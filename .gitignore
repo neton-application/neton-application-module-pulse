@@ -1,0 +1,13 @@
+.gradle/
+build/
+**/build/
+.kotlin/
+.idea/
+.DS_Store
+local.properties
+*.hprof
+*.kexe
+*.kexe.dSYM/
+logs/
+*.log
+*.log.*

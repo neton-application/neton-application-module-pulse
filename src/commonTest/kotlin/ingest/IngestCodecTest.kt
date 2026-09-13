@@ -1,0 +1,63 @@
+package ingest
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
+
+/**
+ * The wire is the contract between the SDK and this server, and the two ship independently, so
+ * both shapes have to keep working: the current `{identity, events}` envelope and the bare event
+ * array that predates it.
+ */
+class IngestCodecTest {
+
+    private val envelope = """
+        {"identity":{"projectId":"p1","installationId":"i1","deviceId":"d1","userId":"u1"},
+         "events":[{"id":"e1","timestamp":123,"sessionId":"s1","kind":"Runtime",
+                    "name":"clipboard_read","source":{"module":"DemoSDK"},"attributes":{}}]}
+    """.trimIndent()
+
+    private val bareArray = """
+        [{"id":"e1","timestamp":123,"sessionId":"s1","kind":"Analytics",
+          "name":"purchase","source":{},"attributes":{}}]
+    """.trimIndent()
+
+    @Test
+    fun theEnvelopeFlattensIdentityOntoEveryRow() {
+        val rows = IngestCodec.toRows(IngestCodec.decodeBatch(envelope.encodeToByteArray()))
+        val row = rows.single()
+        assertEquals("p1", row.projectId)
+        assertEquals("d1", row.deviceId)
+        assertEquals("i1", row.installationId)
+        assertEquals("u1", row.userId)
+        assertEquals("Runtime", row.kind)
+        assertEquals("DemoSDK", row.sourceModule)
+    }
+
+    @Test
+    fun aBareArrayFromAnOlderClientStillIngests() {
+        // No identity available, so those columns stay null — the events must still land rather
+        // than the batch being rejected because an old SDK is in the field.
+        val rows = IngestCodec.toRows(IngestCodec.decodeBatch(bareArray.encodeToByteArray()))
+        val row = rows.single()
+        assertEquals("purchase", row.name)
+        assertNull(row.deviceId)
+        assertNull(row.projectId)
+    }
+
+    @Test
+    fun leadingWhitespaceDoesNotConfuseShapeDetection() {
+        val padded = "  \n\t" + bareArray
+        assertEquals(1, IngestCodec.toRows(IngestCodec.decodeBatch(padded.encodeToByteArray())).size)
+    }
+
+    @Test
+    fun anUnknownFieldIsIgnoredSoEitherSideCanAddOne() {
+        val withExtra = """{"identity":{"projectId":"p","deviceId":"d","futureField":1},
+            "events":[{"id":"e","timestamp":1,"sessionId":"s","kind":"Log","name":"n",
+                       "source":{},"attributes":{},"somethingNew":true}],"alsoNew":"x"}"""
+        val row = IngestCodec.toRows(IngestCodec.decodeBatch(withExtra.encodeToByteArray())).single()
+        assertEquals("d", row.deviceId)
+        assertEquals("n", row.name)
+    }
+}

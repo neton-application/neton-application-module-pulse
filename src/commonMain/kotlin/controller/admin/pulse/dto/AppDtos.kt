@@ -1,0 +1,67 @@
+package controller.admin.pulse.dto
+
+import kotlinx.serialization.Serializable
+import model.PulseApp
+import model.PulseAppVersion
+
+@Serializable
+data class SaveAppRequest(
+    val id: Long = 0,
+    val name: String,
+    val platform: String,
+    val appKey: String,
+    val packageName: String? = null,
+    val remark: String? = null,
+    val status: Int = 1,
+) {
+    fun toModel(): PulseApp = PulseApp(
+        id = id, name = name, platform = platform, appKey = appKey,
+        packageName = packageName?.takeIf { it.isNotBlank() }, remark = remark, status = status,
+    )
+}
+
+@Serializable
+data class SaveVersionRequest(
+    val id: Long = 0,
+    val appId: Long,
+    val versionName: String,
+    val buildNumber: Long,
+    val releaseNotes: String = "",
+    val downloadUrl: String? = null,
+    val forceUpdate: Boolean = false,
+    val published: Int = 0,
+) {
+    fun toModel(publishedAt: Long?): PulseAppVersion = PulseAppVersion(
+        id = id, appId = appId, versionName = versionName, buildNumber = buildNumber,
+        releaseNotes = releaseNotes, downloadUrl = downloadUrl?.takeIf { it.isNotBlank() },
+        forceUpdate = forceUpdate, published = published, publishedAt = publishedAt,
+    )
+}
+
+@Serializable
+data class PublishRequest(val id: Long, val published: Boolean)
+
+/**
+ * One row of the application list: the app's own columns plus the headline release facts, flat.
+ *
+ * Flat rather than a nested app object because the console's resource table addresses columns by a
+ * single key, and because "which version is live" is the first thing an operator looks for — it
+ * belongs in the list, not behind a click.
+ */
+@Serializable
+data class AppRow(
+    val id: Long,
+    val name: String,
+    val platform: String,
+    val appKey: String,
+    val packageName: String? = null,
+    val remark: String? = null,
+    val status: Int,
+    val createdAt: Long? = null,
+    val versionCount: Int = 0,
+    /** The published version with the highest build number, or null if nothing is live yet. */
+    val liveVersion: String? = null,
+    val liveBuild: Long? = null,
+    /** Whether the live version forces an update — the most consequential setting in the module. */
+    val liveForced: Boolean = false,
+)
