@@ -64,6 +64,11 @@ data class PulseModuleAlert(
     val api: String? = null,
     /** Total observed calls for a behaviour alert; 0 for a structural one. */
     val callCount: Long = 0,
+    /**
+     * Short non-identifying label from the call, such as a request's destination. Part of the
+     * identity of a behaviour alert: one SDK contacting two hosts is two findings.
+     */
+    val detail: String? = null,
     val ruleId: Long? = null,
     val severity: String = AuditSeverity.INFO,
     val label: String = "",

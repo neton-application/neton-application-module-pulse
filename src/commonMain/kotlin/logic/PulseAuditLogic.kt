@@ -126,6 +126,7 @@ class PulseAuditLogic(private val log: Logger) {
                 api = row.name,
                 apiClass = apiClass,
                 calls = calls,
+                detail = attribute(row.attributes, "detail"),
             )
         }
     }
@@ -151,6 +152,7 @@ class PulseAuditLogic(private val log: Logger) {
         api: String? = null,
         apiClass: String? = null,
         calls: Long = 0,
+        detail: String? = null,
     ) {
         val projectId = row.projectId ?: ""
         // Keyed on the API too: "SDWebImage ships in this app", "SDWebImage read the clipboard"
@@ -164,14 +166,14 @@ class PulseAuditLogic(private val log: Logger) {
                     PulseModuleAlert::kind eq kind,
                 )
             }
-        }.list().firstOrNull { it.api == api }
+        }.list().firstOrNull { it.api == api && it.detail == detail }
 
         val alertId: Long
         if (existing == null) {
             alertId = PulseModuleAlertTable.insert(
                 PulseModuleAlert(
                     projectId = projectId, moduleName = moduleName, ruleId = rule.id,
-                    kind = kind, api = api, callCount = calls,
+                    kind = kind, api = api, callCount = calls, detail = detail,
                     severity = rule.severity,
                     label = if (apiClass != null) "${rule.label} · $apiClass" else rule.label,
                     note = rule.note,
