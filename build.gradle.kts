@@ -28,6 +28,10 @@ kotlin {
                 implementation("com.netonstream:neton-database")
                 implementation("com.netonstream:neton-redis")
                 implementation("com.netonstream:neton-logging")
+                // Outbound HTTP for alert webhooks; the engine is chosen by the application.
+                implementation("com.netonstream:neton-http")
+                // Scheduled alert evaluation (@Job).
+                implementation("com.netonstream:neton-jobs")
                 // The msgtrans long-connection ingest transport (sibling composite builds).
                 implementation("com.netonstream.msgtrans:msgtrans-transport")
                 implementation("com.netonstream.io:neton-io-net")

@@ -4,6 +4,7 @@ import consume.PulseConsumer
 import ingest.PulseIngestServer
 import logic.PulseAppLogic
 import logic.PulseAuditLogic
+import logic.PulseAlertLogic
 import logic.PulseCrashLogic
 import logic.PulseIngestLogic
 import neton.core.component.NetonContext
@@ -25,6 +26,11 @@ object PulseRuntimeBootstrap {
         val appLogic = ctx.get(PulseAppLogic::class)
         val auditLogic = ctx.get(PulseAuditLogic::class)
         val crashLogic = ctx.get(PulseCrashLogic::class)
+
+        // The outbound client is owned by the application; this module only borrows it and must
+        // never close it. Absent, alerts are still evaluated and recorded — they just have
+        // nowhere to be delivered, which the record says explicitly.
+        ctx.get(PulseAlertLogic::class).httpClient = ctx.getOrNull(neton.http.client.HttpClient::class)
 
         // One queue instance shared by both ends, and bound into the context so the admin
         // controller can report on and operate the very same lists the pipeline uses.
