@@ -27,7 +27,7 @@ class PulseIngestLogic(
         if (rows.isEmpty()) return 0
 
         val columns = "event_id, session_id, ts, kind, name, source_module, attributes, " +
-            "project_id, device_id, installation_id, user_id, created_at"
+            "project_id, device_id, installation_id, user_id, app_version, build_number, created_at"
         val params = HashMap<String, Any?>(rows.size * 12)
         val values = rows.mapIndexed { i, r ->
             params["event_id_$i"] = r.eventId
@@ -41,10 +41,12 @@ class PulseIngestLogic(
             params["device_id_$i"] = r.deviceId
             params["installation_id_$i"] = r.installationId
             params["user_id_$i"] = r.userId
+            params["app_version_$i"] = r.appVersion
+            params["build_number_$i"] = r.buildNumber
             params["created_at_$i"] = r.createdAt ?: nowMs()
             "(:event_id_$i, :session_id_$i, :ts_$i, :kind_$i, :name_$i, :source_module_$i, " +
                 ":attributes_$i, :project_id_$i, :device_id_$i, :installation_id_$i, " +
-                ":user_id_$i, :created_at_$i)"
+                ":user_id_$i, :app_version_$i, :build_number_$i, :created_at_$i)"
         }.joinToString(", ")
 
         val written = db.execute(

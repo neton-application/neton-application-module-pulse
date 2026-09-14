@@ -35,5 +35,8 @@ data class PulseEvent(
     val deviceId: String? = null,
     val installationId: String? = null,
     val userId: String? = null,
+    /** The build this session ran; symbol tables are keyed by it (see V012). */
+    val appVersion: String? = null,
+    val buildNumber: Long? = null,
     @CreatedAt val createdAt: Long? = null,
 )

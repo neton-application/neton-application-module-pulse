@@ -8,6 +8,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import ingest.IngestCodec
+import logic.PulseAuditLogic
+import logic.PulseCrashLogic
 import logic.PulseIngestLogic
 import neton.core.component.NetonLifecycle
 import neton.logging.Logger
@@ -31,6 +33,8 @@ import queue.PulseQueue
 class PulseConsumer(
     private val queue: PulseQueue,
     private val ingest: PulseIngestLogic,
+    private val audit: PulseAuditLogic,
+    private val crashes: PulseCrashLogic,
     private val log: Logger,
     private val idleDelayMs: Long = 200,
     private val burst: Int = 64,
@@ -49,8 +53,23 @@ class PulseConsumer(
                     handled++
                     try {
                         val batch = IngestCodec.decodeBatch(envelope.payload.encodeToByteArray())
-                        ingest.persist(IngestCodec.toRows(batch))
+                        val rows = IngestCodec.toRows(batch)
+                        ingest.persist(rows)
                         queue.onPersisted()
+                        // Derived from the events, after they are safely written. A failure here
+                        // must not cost the batch: the raw event is the record, the audit alert is
+                        // a view of it that can always be rebuilt.
+                        val now = nowMs()
+                        try {
+                            audit.evaluate(rows, now)
+                        } catch (t: Throwable) {
+                            log.warn("pulse audit evaluation failed: ${t.message}")
+                        }
+                        try {
+                            crashes.aggregate(rows, now)
+                        } catch (t: Throwable) {
+                            log.warn("pulse crash aggregation failed: ${t.message}")
+                        }
                     } catch (t: Throwable) {
                         // Both failure modes land here on purpose. A malformed payload will never
                         // parse no matter how often it is retried, but it still goes through the
@@ -65,6 +84,8 @@ class PulseConsumer(
             }
         }
     }
+
+    private fun nowMs(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
     override suspend fun stop() {
         scope.cancel()

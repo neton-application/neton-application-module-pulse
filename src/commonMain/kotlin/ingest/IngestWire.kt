@@ -41,6 +41,8 @@ data class IngestIdentity(
     val installationId: String? = null,
     val deviceId: String? = null,
     val userId: String? = null,
+    val appVersion: String? = null,
+    val buildNumber: Long = 0,
 )
 
 /** Decodes a batch and maps it to persistable rows. */
@@ -76,6 +78,8 @@ object IngestCodec {
             deviceId = batch.identity.deviceId,
             installationId = batch.identity.installationId,
             userId = batch.identity.userId,
+            appVersion = batch.identity.appVersion,
+            buildNumber = batch.identity.buildNumber.takeIf { it > 0 },
         )
     }
 }

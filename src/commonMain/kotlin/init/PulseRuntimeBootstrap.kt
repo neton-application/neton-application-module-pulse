@@ -3,6 +3,8 @@ package init
 import consume.PulseConsumer
 import ingest.PulseIngestServer
 import logic.PulseAppLogic
+import logic.PulseAuditLogic
+import logic.PulseCrashLogic
 import logic.PulseIngestLogic
 import neton.core.component.NetonContext
 import neton.logging.LoggerFactory
@@ -21,6 +23,8 @@ object PulseRuntimeBootstrap {
         val redis = ctx.get(RedisClient::class)
         val ingestLogic = ctx.get(PulseIngestLogic::class)
         val appLogic = ctx.get(PulseAppLogic::class)
+        val auditLogic = ctx.get(PulseAuditLogic::class)
+        val crashLogic = ctx.get(PulseCrashLogic::class)
 
         // One queue instance shared by both ends, and bound into the context so the admin
         // controller can report on and operate the very same lists the pipeline uses.
@@ -28,7 +32,7 @@ object PulseRuntimeBootstrap {
         ctx.bind(PulseQueue::class, queue)
 
         val server = PulseIngestServer(queue, appLogic, loggerFactory.get("pulse.ingest-server"))
-        val consumer = PulseConsumer(queue, ingestLogic, loggerFactory.get("pulse.consumer"))
+        val consumer = PulseConsumer(queue, ingestLogic, auditLogic, crashLogic, loggerFactory.get("pulse.consumer"))
 
         ctx.lifecycle.register("pulse-msgtrans-ingest", server)
         ctx.lifecycle.register("pulse-consumer", consumer)
