@@ -97,7 +97,7 @@ object IngestCodec {
 
 /**
  * Startup update check, sent over the same msgtrans connection as ingest but under
- * [BIZ_UPDATE_CHECK]. The client knows its platform and package name from the build itself and its
+ * [PulseBizType.APP_UPDATE_CHECK]. The client knows its platform and package name from the build itself and its
  * app key from SDK configuration; the server needs whichever of the two it can get.
  */
 @Serializable
@@ -110,8 +110,8 @@ data class UpdateCheckRequest(
 
 /** Business types on the ingest connection. */
 object PulseBizType {
-    /** An event batch. */
-    const val INGEST = 1
+    /** Upload one identity envelope containing an ordered event array. */
+    const val EVENT_BATCH_UPLOAD = 1
     /** A startup update check. */
-    const val UPDATE_CHECK = 2
+    const val APP_UPDATE_CHECK = 2
 }

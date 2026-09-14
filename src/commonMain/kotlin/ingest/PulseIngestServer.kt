@@ -116,12 +116,12 @@ class PulseIngestServer(
                 val server = Transport.bind(this, bindHost, bindPort) { conn ->
                     conn.onRequest { payload, bizType ->
                         when (bizType) {
-                            PulseBizType.UPDATE_CHECK -> {
+                            PulseBizType.APP_UPDATE_CHECK -> {
                                 val reply = CompletableDeferred<ByteArray>()
                                 if (queries.trySend(UpdateQuery(payload, reply)).isSuccess) reply.await()
                                 else EMPTY_ACK   // overloaded: answer nothing rather than block the client
                             }
-                            else -> {
+                            PulseBizType.EVENT_BATCH_UPLOAD -> {
                                 // Acknowledge only once the batch is on the queue. Throwing here
                                 // fails the client's request, which is exactly what makes it keep
                                 // the batch and send it again — an ack has to mean "durable".
@@ -131,6 +131,7 @@ class PulseIngestServer(
                                 if (!accepted.await()) throw IngestOverloadedException()
                                 EMPTY_ACK
                             }
+                            else -> throw UnsupportedBizTypeException(bizType)
                         }
                     }
                 }
@@ -165,6 +166,10 @@ class PulseIngestServer(
     /** Signals the client that the batch was not taken, so it keeps it and retries. */
     private class IngestOverloadedException :
         Exception("pulse ingest is overloaded; batch not accepted")
+
+    /** Unknown application messages are rejected instead of being mistaken for telemetry. */
+    private class UnsupportedBizTypeException(bizType: Int) :
+        Exception("unsupported pulse biz_type=$bizType")
 
     private fun nowMs(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
