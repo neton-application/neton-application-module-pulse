@@ -115,8 +115,17 @@ class PulseCrashLogic(
         }
 
         val deviceId = row.deviceId ?: return
+        // Per build, not just per device: a device that hits the same issue on two releases must
+        // leave a record against each, otherwise "what did this release introduce" reads the
+        // device's *first* build and reports an old issue as a regression.
         val seen = PulseCrashSightingTable.query {
-            where { and(PulseCrashSighting::issueId eq issueId, PulseCrashSighting::deviceId eq deviceId) }
+            where {
+                and(
+                    PulseCrashSighting::issueId eq issueId,
+                    PulseCrashSighting::deviceId eq deviceId,
+                    PulseCrashSighting::buildNumber eq row.buildNumber,
+                )
+            }
         }.list().firstOrNull()
         if (seen == null) {
             PulseCrashSightingTable.insert(
@@ -125,9 +134,14 @@ class PulseCrashLogic(
                 firstSeenAt = nowMs, lastSeenAt = nowMs,
             ),
             )
-            // Recounted rather than incremented: the ingest path is at-least-once, and an
+            // Distinct devices, not sighting rows: there is now one row per (device, build), so
+            // counting rows would inflate the figure for every user who upgraded.
+            // Recounted rather than incremented because the ingest path is at-least-once and an
             // incremented counter would drift upward on every replayed batch.
-            val count = PulseCrashSightingTable.query { where { PulseCrashSighting::issueId eq issueId } }.count()
+            val count = db.fetchAll(
+                "SELECT COUNT(DISTINCT device_id) AS c FROM pulse_crash_sightings WHERE issue_id = :issue_id",
+                mapOf("issue_id" to issueId),
+            ).firstOrNull()?.long("c") ?: 0L
             PulseCrashIssueTable.get(issueId)?.let { PulseCrashIssueTable.update(it.copy(deviceCount = count)) }
         } else {
             PulseCrashSightingTable.update(seen.copy(lastSeenAt = nowMs))
