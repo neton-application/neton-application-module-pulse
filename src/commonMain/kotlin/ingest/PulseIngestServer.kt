@@ -175,6 +175,6 @@ class PulseIngestServer(
 
     companion object {
         private val EMPTY_ACK = ByteArray(0)
-        fun defaultPort(): Int = getenv("PULSE_INGEST_PORT")?.toKString()?.toIntOrNull() ?: 9600
+        fun defaultPort(): Int = getenv("PULSE_INGEST_PORT")?.toKString()?.toIntOrNull() ?: 6000
     }
 }
