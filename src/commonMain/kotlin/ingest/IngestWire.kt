@@ -75,6 +75,9 @@ object IngestCodec {
             kind = e.kind,
             name = e.name,
             sourceModule = e.source.module,
+            sourceImageUuid = e.source.imageUuid
+                ?.lowercase()
+                ?.takeIf(IMAGE_UUID::matches),
             attributes = json.encodeToString(JsonObject.serializer(), JsonObject(e.attributes)),
             projectId = batch.identity.projectId,
             deviceId = batch.identity.deviceId,
@@ -86,6 +89,10 @@ object IngestCodec {
             packageName = batch.identity.packageName,
         )
     }
+
+    private val IMAGE_UUID = Regex(
+        "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    )
 }
 
 /**

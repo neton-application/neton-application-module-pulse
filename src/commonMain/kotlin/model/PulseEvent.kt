@@ -25,6 +25,8 @@ data class PulseEvent(
     val name: String,
     /** Neutral source module (server attributes first/system/third-party, not the client). */
     val sourceModule: String? = null,
+    /** Mach-O LC_UUID of the source image; stable evidence for same-name binary replacement. */
+    val sourceImageUuid: String? = null,
     /** Attributes JSON string (metadata only). */
     val attributes: String = "{}",
     /**

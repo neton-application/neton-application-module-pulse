@@ -14,7 +14,7 @@ class IngestCodecTest {
     private val envelope = """
         {"identity":{"projectId":"p1","installationId":"i1","deviceId":"d1","userId":"u1"},
          "events":[{"id":"e1","timestamp":123,"sessionId":"s1","kind":"Runtime",
-                    "name":"clipboard_read","source":{"module":"DemoSDK"},"attributes":{}}]}
+                    "name":"clipboard_read","source":{"module":"DemoSDK","imageUuid":"00112233-4455-6677-8899-aabbccddeeff"},"attributes":{}}]}
     """.trimIndent()
 
     private val bareArray = """
@@ -32,6 +32,7 @@ class IngestCodecTest {
         assertEquals("u1", row.userId)
         assertEquals("Runtime", row.kind)
         assertEquals("DemoSDK", row.sourceModule)
+        assertEquals("00112233-4455-6677-8899-aabbccddeeff", row.sourceImageUuid)
     }
 
     @Test
@@ -59,5 +60,12 @@ class IngestCodecTest {
         val row = IngestCodec.toRows(IngestCodec.decodeBatch(withExtra.encodeToByteArray())).single()
         assertEquals("d", row.deviceId)
         assertEquals("n", row.name)
+    }
+
+    @Test
+    fun malformedImageUuidCannotPoisonTheDatabaseBatch() {
+        val payload = envelope.replace("00112233-4455-6677-8899-aabbccddeeff", "not-a-uuid")
+        val row = IngestCodec.toRows(IngestCodec.decodeBatch(payload.encodeToByteArray())).single()
+        assertNull(row.sourceImageUuid)
     }
 }
