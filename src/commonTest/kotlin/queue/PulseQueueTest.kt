@@ -96,7 +96,7 @@ class PulseQueueTest {
         val (_, q) = queue()
         q.enqueue("a", nowMs = 1)
         q.enqueue("b", nowMs = 2)
-        q.dequeue(); q.onPersisted()
+        val first = q.dequeue()!!; q.onPersisted(first)
         val second = q.dequeue()!!
         q.onFailed(second, "boom", maxAttempts = 2)     // one retry
         q.onFailed(q.dequeue()!!, "boom", maxAttempts = 2)  // now dead
@@ -133,7 +133,21 @@ class PulseQueueTest {
         val depth = q.depth()
         assertEquals(2, depth.work)
         assertEquals(1, depth.retry)
+        assertEquals(0, depth.processing)
         assertEquals(1, depth.dead)
+    }
+
+    @Test
+    fun anUnacknowledgedClaimIsRecoveredAfterRestart() = runTest {
+        val (redis, firstProcess) = queue()
+        firstProcess.enqueue("a", nowMs = 1)
+        firstProcess.enqueue("b", nowMs = 2)
+        assertEquals("a", firstProcess.dequeue()?.payload)
+        assertEquals(1, redis.lists[PulseQueue.PROCESSING]?.size)
+
+        val restarted = PulseQueue(redis)
+        assertEquals(1, restarted.recoverProcessing())
+        assertEquals("a", restarted.dequeue()?.payload)
     }
 
     @Test

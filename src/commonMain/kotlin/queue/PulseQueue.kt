@@ -1,6 +1,7 @@
 package queue
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.json.Json
 import neton.redis.RedisClient
 
@@ -30,6 +31,8 @@ class PulseQueue(private val redis: RedisClient) {
         val firstSeenMs: Long = 0,
         /** Why the last attempt failed; only set once something has gone wrong. */
         val lastError: String? = null,
+        /** Exact Redis value in PROCESSING; local acknowledgement token, never serialized. */
+        @Transient val receipt: String = "",
     )
 
     suspend fun enqueue(payload: String, nowMs: Long) {
@@ -39,12 +42,13 @@ class PulseQueue(private val redis: RedisClient) {
 
     /** Take the next batch, preferring retries so a failing batch cannot be starved by new traffic. */
     suspend fun dequeue(): Envelope? {
-        val raw = redis.lpop(RETRY) ?: redis.lpop(WORK) ?: return null
+        val raw = redis.lmove(RETRY, PROCESSING) ?: redis.lmove(WORK, PROCESSING) ?: return null
         return decode(raw)
     }
 
     /** Counted per batch; per-event totals are a database question, not a queue one. */
-    suspend fun onPersisted() {
+    suspend fun onPersisted(envelope: Envelope) {
+        redis.lrem(PROCESSING, 1, envelope.receipt)
         redis.incr(COUNTER_CONSUMED)
     }
 
@@ -63,6 +67,9 @@ class PulseQueue(private val redis: RedisClient) {
             redis.rpush(RETRY, json.encodeToString(Envelope.serializer(), next))
             redis.incr(COUNTER_FAILED)
         }
+        // Push first, then remove the claim. A crash between these operations can duplicate work,
+        // which event-id idempotency absorbs; reversing them could permanently lose it.
+        redis.lrem(PROCESSING, 1, envelope.receipt)
     }
 
     /**
@@ -96,6 +103,13 @@ class PulseQueue(private val redis: RedisClient) {
         return removed
     }
 
+    /** Return claims left by the previous process to the retry queue, preserving FIFO order. */
+    suspend fun recoverProcessing(): Int {
+        var recovered = 0
+        while (redis.lmove(PROCESSING, RETRY) != null) recovered++
+        return recovered
+    }
+
     /** Newest-first is wrong here: the oldest dead letters are the ones an operator needs to see. */
     suspend fun peekDeadLetters(limit: Int = 50): List<Envelope> =
         redis.lrange(DEAD, 0, limit - 1).mapNotNull { decode(it) }
@@ -105,6 +119,7 @@ class PulseQueue(private val redis: RedisClient) {
         // count of a runaway queue is not worth the memory to materialise it.
         work = redis.lrange(WORK, 0, DEPTH_PROBE - 1).size,
         retry = redis.lrange(RETRY, 0, DEPTH_PROBE - 1).size,
+        processing = redis.lrange(PROCESSING, 0, DEPTH_PROBE - 1).size,
         dead = redis.lrange(DEAD, 0, DEPTH_PROBE - 1).size,
         truncatedAt = DEPTH_PROBE,
     )
@@ -125,10 +140,16 @@ class PulseQueue(private val redis: RedisClient) {
         // A payload written before the envelope existed, or by something else entirely. Treat the
         // whole string as the payload rather than discarding data we cannot parse.
         Envelope(payload = raw)
-    }
+    }.copy(receipt = raw)
 
     @Serializable
-    data class QueueDepth(val work: Int, val retry: Int, val dead: Int, val truncatedAt: Int)
+    data class QueueDepth(
+        val work: Int,
+        val retry: Int,
+        val processing: Int = 0,
+        val dead: Int,
+        val truncatedAt: Int,
+    )
 
     @Serializable
     data class QueueCounters(
@@ -146,6 +167,8 @@ class PulseQueue(private val redis: RedisClient) {
         const val RETRY = "pulse:ingest:retry"
         /** Batches that exhausted their attempts; kept for inspection and manual replay. */
         const val DEAD = "pulse:ingest:dead"
+        /** Claimed but not yet committed to PostgreSQL. */
+        const val PROCESSING = "pulse:ingest:processing"
 
         private const val COUNTER_ENQUEUED = "pulse:ingest:stat:enqueued"
         private const val COUNTER_CONSUMED = "pulse:ingest:stat:consumed"

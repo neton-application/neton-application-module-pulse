@@ -18,8 +18,8 @@ import queue.PulseQueue
 /**
  * Drains the ingest queue into the database.
  *
- * neton-redis exposes only non-blocking LPOP — no BLPOP, no streams — so this is a poll loop:
- * drain up to a burst per tick, back off briefly when there is nothing to do.
+ * neton-redis exposes non-blocking LMOVE — no blocking stream consumer — so this is a poll loop:
+ * atomically claim into PROCESSING, drain up to a burst per tick, and back off when idle.
  *
  * What it does *not* do any more is drop a batch it failed to write. The previous version logged a
  * warning and moved on, which turned every transient database hiccup into permanent data loss for
@@ -27,8 +27,9 @@ import queue.PulseQueue
  * attempt, and after [maxAttempts] lands in the dead letter list where an operator can see it and
  * replay it. Retries are safe because the insert is idempotent on event_id.
  *
- * A single consumer per process is enough at this scale; Redis being the queue means more
- * consumers or more nodes can be added later without changing the ingest side.
+ * The current PROCESSING recovery contract assumes one active consumer instance. Before running
+ * multiple server nodes, replace startup-wide recovery with per-consumer leases (or Redis Streams)
+ * so one live node cannot reclaim another live node's in-flight batch.
  */
 class PulseConsumer(
     private val queue: PulseQueue,
@@ -45,6 +46,8 @@ class PulseConsumer(
 
     override suspend fun start() {
         scope.launch {
+            val recovered = queue.recoverProcessing()
+            if (recovered > 0) log.warn("pulse recovered $recovered unacknowledged batches")
             log.info("pulse consumer started (work=${PulseQueue.WORK} retry=${PulseQueue.RETRY} dead=${PulseQueue.DEAD})")
             while (isActive) {
                 var handled = 0
@@ -55,7 +58,7 @@ class PulseConsumer(
                         val batch = IngestCodec.decodeBatch(envelope.payload.encodeToByteArray())
                         val rows = IngestCodec.toRows(batch)
                         ingest.persist(rows)
-                        queue.onPersisted()
+                        queue.onPersisted(envelope)
                         // Derived from the events, after they are safely written. A failure here
                         // must not cost the batch: the raw event is the record, the audit alert is
                         // a view of it that can always be rebuilt.

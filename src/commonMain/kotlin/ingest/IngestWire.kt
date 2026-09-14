@@ -33,6 +33,8 @@ data class IngestSource(val module: String? = null, val imageUuid: String? = nul
 data class IngestBatch(
     val identity: IngestIdentity = IngestIdentity(),
     val events: List<IngestEvent> = emptyList(),
+    /** Stable client outbox identity; optional for SDKs released before durable batching. */
+    val batchId: String? = null,
 )
 
 @Serializable

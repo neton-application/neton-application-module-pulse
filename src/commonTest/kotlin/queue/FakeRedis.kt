@@ -18,6 +18,22 @@ class FakeRedis : RedisClient {
     override suspend fun rpush(key: String, value: Any) { list(key).add(value.toString()) }
     override suspend fun lpush(key: String, value: Any) { list(key).add(0, value.toString()) }
     override suspend fun lpop(key: String): String? = list(key).removeFirstOrNull()
+    override suspend fun lmove(source: String, destination: String, from: String, to: String): String? {
+        val sourceList = list(source)
+        val value = (if (from == "LEFT") sourceList.removeFirstOrNull() else sourceList.removeLastOrNull())
+            ?: return null
+        if (to == "LEFT") list(destination).add(0, value) else list(destination).add(value)
+        return value
+    }
+    override suspend fun lrem(key: String, count: Long, value: String): Long {
+        val values = list(key)
+        var removed = 0L
+        val iterator = values.listIterator()
+        while (iterator.hasNext() && (count <= 0 || removed < count)) {
+            if (iterator.next() == value) { iterator.remove(); removed++ }
+        }
+        return removed
+    }
     override suspend fun lrange(key: String, start: Int, end: Int): List<String> {
         val l = list(key)
         if (l.isEmpty()) return emptyList()
