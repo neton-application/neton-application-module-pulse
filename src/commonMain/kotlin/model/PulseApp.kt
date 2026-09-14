@@ -24,12 +24,40 @@ data class PulseApp(
     val appKey: String,
     /** iOS bundle id, Android applicationId, HarmonyOS bundleName. Null for web. */
     val packageName: String? = null,
+    /** strict / allowlist / any — see [PulsePackagePolicy]. */
+    val packagePolicy: String = PulsePackagePolicy.STRICT,
+    /** Extra bundle identifiers for allowlist policy, comma or newline separated. */
+    val allowedPackages: String? = null,
     val remark: String? = null,
     /** 1 enabled, 0 disabled. A disabled app keeps its data but stops answering update checks. */
     val status: Int = 1,
     @CreatedAt val createdAt: Long? = null,
     @UpdatedAt val updatedAt: Long? = null,
 )
+
+/**
+ * Package validation belongs to an App, not to the App ID itself. App IDs are stable public
+ * identifiers; bundle identifiers can legitimately change during internal resigning.
+ */
+object PulsePackagePolicy {
+    const val STRICT = "strict"
+    const val ALLOWLIST = "allowlist"
+    const val ANY = "any"
+    val ALL = listOf(STRICT, ALLOWLIST, ANY)
+
+    fun isValid(value: String) = value in ALL
+
+    fun accepts(app: PulseApp, reported: String?): Boolean = when (app.packagePolicy) {
+        ANY -> true
+        STRICT -> !reported.isNullOrBlank() && reported == app.packageName
+        ALLOWLIST -> !reported.isNullOrBlank() && reported in buildSet {
+            app.packageName?.takeIf(String::isNotBlank)?.let(::add)
+            app.allowedPackages.orEmpty().split(',', '\n').map(String::trim)
+                .filter(String::isNotBlank).forEach(::add)
+        }
+        else -> false
+    }
+}
 
 /**
  * Supported platforms. Stored as a string so adding one is not a schema change; validated on write

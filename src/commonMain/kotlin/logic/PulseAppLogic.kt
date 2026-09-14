@@ -4,6 +4,7 @@ import kotlinx.serialization.Serializable
 import model.PulseApp
 import model.PulseAppVersion
 import model.PulsePlatform
+import model.PulsePackagePolicy
 import neton.core.http.BadRequestException
 import neton.database.dsl.*
 import neton.logging.Logger
@@ -48,9 +49,12 @@ class PulseAppLogic(private val log: Logger) {
     // ---- apps
 
     suspend fun createApp(app: PulseApp): Long {
-        validate(app)
-        val inserted = PulseAppTable.insert(app)
-        log.info("created pulse app id=${inserted.id} platform=${app.platform} key=${app.appKey}")
+        // Never trust a caller-supplied identifier on create. The console/API receives the stable
+        // value only after insertion, and edits preserve it.
+        val ready = app.copy(appKey = generateAvailableAppKey())
+        validate(ready)
+        val inserted = PulseAppTable.insert(ready)
+        log.info("created pulse app id=${inserted.id} platform=${ready.platform} key=${ready.appKey}")
         return inserted.id
     }
 
@@ -94,18 +98,24 @@ class PulseAppLogic(private val log: Logger) {
         if (!PulsePlatform.isValid(app.platform)) {
             throw BadRequestException("未知平台 '${app.platform}'，可选：${PulsePlatform.ALL.joinToString("、")}")
         }
+        if (!PulsePackagePolicy.isValid(app.packagePolicy)) {
+            throw BadRequestException(
+                "未知包名策略 '${app.packagePolicy}'，可选：${PulsePackagePolicy.ALL.joinToString("、")}",
+            )
+        }
         // Web has no package name; every native platform must have one, since it is how a build in
         // the field is identified when it does not know its own app key.
-        if (app.platform != PulsePlatform.WEB && app.packageName.isNullOrBlank()) {
+        if (app.platform != PulsePlatform.WEB &&
+            app.packagePolicy != PulsePackagePolicy.ANY && app.packageName.isNullOrBlank()) {
             throw BadRequestException("平台 '${app.platform}' 必须填写包名")
         }
         // Checked here rather than left to the unique index, so the operator gets a sentence
         // instead of a constraint violation. The index still backstops a race.
         val clash = PulseAppTable.query {
-            where { and(PulseApp::platform eq app.platform, PulseApp::appKey eq app.appKey) }
+            where { PulseApp::appKey eq app.appKey }
         }.list().firstOrNull { it.id != app.id }
         if (clash != null) {
-            throw BadRequestException("平台 '${app.platform}' 下已存在应用标识 '${app.appKey}'（${clash.name}）")
+            throw BadRequestException("已存在应用标识 '${app.appKey}'（${clash.name}）")
         }
     }
 
@@ -205,13 +215,68 @@ class PulseAppLogic(private val log: Logger) {
         appKey?.takeIf { it.isNotBlank() }?.let { key ->
             PulseAppTable.query {
                 where { and(PulseApp::platform eq platform, PulseApp::appKey eq key) }
-            }.list().firstOrNull()?.let { return it }
+            }.list().firstOrNull()
+                ?.takeIf { PulsePackagePolicy.accepts(it, packageName) }
+                ?.let { return it }
         }
         packageName?.takeIf { it.isNotBlank() }?.let { pkg ->
-            return PulseAppTable.query {
+            val direct = PulseAppTable.query {
                 where { and(PulseApp::platform eq platform, PulseApp::packageName eq pkg) }
             }.list().firstOrNull()
+            if (direct != null && PulsePackagePolicy.accepts(direct, pkg)) return direct
+            // Compatibility path for an older client that knows its package but not App ID, where
+            // the package is one of an App's explicitly allowed resigning identifiers.
+            return PulseAppTable.query {
+                where { PulseApp::platform eq platform }
+            }.list().firstOrNull { PulsePackagePolicy.accepts(it, pkg) }
         }
         return null
+    }
+
+    /**
+     * Validate an event batch before persistence. Null means accepted; a message is a permanent
+     * configuration rejection suitable for the dead-letter console.
+     */
+    suspend fun ingestRejection(
+        appKey: String?,
+        platform: String?,
+        packageName: String?,
+    ): String? {
+        val key = appKey?.takeIf(String::isNotBlank)
+        // The oldest wire shape had no identity at all. It remains ingestible so server rollout
+        // does not invalidate already shipped builds; it cannot be associated with an App policy.
+        if (key == null && platform.isNullOrBlank() && packageName.isNullOrBlank()) return null
+        if (key == null) {
+            val p = platform?.takeIf(String::isNotBlank) ?: return "missing App ID"
+            val pkg = packageName?.takeIf(String::isNotBlank) ?: return "missing App ID"
+            return if (findApp(p, null, pkg) != null) null
+            else "package '$pkg' is not registered for platform '$p'"
+        }
+        val candidates = PulseAppTable.query {
+            where { PulseApp::appKey eq key }
+        }.list()
+        val app = if (platform.isNullOrBlank()) candidates.singleOrNull()
+        else candidates.firstOrNull { it.platform == platform }
+        if (app == null) return "unknown App ID '$key'"
+        if (app.status != 1) return "App ID '$key' is disabled"
+        if (!PulsePackagePolicy.accepts(app, packageName)) {
+            return "package '${packageName ?: "<missing>"}' is not allowed for App ID '$key'"
+        }
+        return null
+    }
+
+    private suspend fun generateAvailableAppKey(): String {
+        val alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+        repeat(5) {
+            val suffix = buildString(24) {
+                repeat(24) { append(alphabet[kotlin.random.Random.nextInt(alphabet.length)]) }
+            }
+            val candidate = "pulse_$suffix"
+            val exists = PulseAppTable.query { where { PulseApp::appKey eq candidate } }
+                .list().isNotEmpty()
+            if (!exists) return candidate
+        }
+        // The key space is enormous; reaching this means the random source or database is broken.
+        throw IllegalStateException("could not allocate a unique Pulse App ID")
     }
 }

@@ -109,6 +109,20 @@ class PulseQueueTest {
     }
 
     @Test
+    fun aPolicyRejectionIsEvidenceAndNeverQueuedForRetry() = runTest {
+        val (_, q) = queue()
+        q.reject("rejected", "package mismatch", nowMs = 42)
+
+        assertNull(q.dequeue())
+        val rejected = q.peekDeadLetters().single()
+        assertEquals("rejected", rejected.payload)
+        assertEquals("package mismatch", rejected.lastError)
+        assertEquals(42, rejected.firstSeenMs)
+        assertEquals(1, q.counters().rejected)
+        assertEquals(1, q.counters().dead)
+    }
+
+    @Test
     fun depthReportsEachListSeparately() = runTest {
         val (_, q) = queue()
         q.enqueue("w1", nowMs = 1)

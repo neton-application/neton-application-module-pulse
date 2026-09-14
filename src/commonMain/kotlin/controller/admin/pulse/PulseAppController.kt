@@ -45,7 +45,8 @@ class PulseAppController(private val apps: PulseAppLogic) {
             val live = versions.firstOrNull { it.published == 1 }
             AppRow(
                 id = app.id, name = app.name, platform = app.platform, appKey = app.appKey,
-                packageName = app.packageName, remark = app.remark, status = app.status,
+                packageName = app.packageName, packagePolicy = app.packagePolicy,
+                allowedPackages = app.allowedPackages, remark = app.remark, status = app.status,
                 createdAt = app.createdAt,
                 versionCount = versions.size,
                 liveVersion = live?.versionName, liveBuild = live?.buildNumber,
@@ -67,8 +68,8 @@ class PulseAppController(private val apps: PulseAppLogic) {
     @Put("/update")
     @Permission("pulse:app:save")
     suspend fun update(@Body request: SaveAppRequest) {
-        apps.getApp(request.id) ?: throw BadRequestException("应用不存在：${request.id}")
-        apps.updateApp(request.toModel())
+        val existing = apps.getApp(request.id) ?: throw BadRequestException("应用不存在：${request.id}")
+        apps.updateApp(request.toModel(existing.appKey))
     }
 
     @Delete("/delete/{id}")

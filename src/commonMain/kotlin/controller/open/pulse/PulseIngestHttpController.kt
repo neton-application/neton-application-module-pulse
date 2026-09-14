@@ -11,6 +11,7 @@ import neton.core.annotations.Post
 import neton.core.annotations.RateLimit
 import neton.core.annotations.RateLimitScope
 import neton.logging.Logger
+import neton.core.http.BadRequestException
 import queue.PulseQueue
 
 /**
@@ -53,6 +54,9 @@ class PulseIngestHttpController(
         // it, so a body that would only fail later in the consumer is rejected here with a 4xx
         // instead of being queued and quietly dead-lettered.
         if (batch.events.isEmpty()) return IngestResponse(0)
+        apps.ingestRejection(
+            batch.identity.projectId, batch.identity.platform, batch.identity.packageName,
+        )?.let { throw BadRequestException(it) }
         // Re-encoded rather than forwarding the original bytes, so exactly one shape reaches the
         // queue no matter which entry point produced it.
         queue.enqueue(IngestCodec.json.encodeToString(ingest.IngestBatch.serializer(), batch), nowMs())

@@ -69,7 +69,20 @@ class PulseIngestServer(
         scope.launch {
             for (pending in batches) {
                 val ok = try {
-                    queue.enqueue(pending.payload.decodeToString(), nowMs())
+                    val text = pending.payload.decodeToString()
+                    val identity = IngestCodec.decodeBatch(pending.payload).identity
+                    val rejected = apps.ingestRejection(
+                        identity.projectId, identity.platform, identity.packageName,
+                    )
+                    if (rejected == null) {
+                        queue.enqueue(text, nowMs())
+                    } else {
+                        // Permanent configuration rejection. Keep the raw batch in dead letters as
+                        // evidence, acknowledge it so the client does not retry forever, and let an
+                        // operator loosen the policy then replay if the package is legitimate.
+                        queue.reject(text, rejected, nowMs())
+                        log.warn("pulse ingest rejected: $rejected")
+                    }
                     true
                 } catch (t: Throwable) {
                     log.warn("pulse ingest enqueue failed: ${t.message}")

@@ -65,6 +65,17 @@ class PulseQueue(private val redis: RedisClient) {
         }
     }
 
+    /**
+     * Keep a permanently rejected submission as evidence without retrying it. Package-policy
+     * failures cannot heal through retries; an operator can change the App policy and replay it.
+     */
+    suspend fun reject(payload: String, error: String, nowMs: Long) {
+        val envelope = Envelope(payload, attempts = 1, firstSeenMs = nowMs, lastError = error.take(500))
+        redis.rpush(DEAD, json.encodeToString(Envelope.serializer(), envelope))
+        redis.incr(COUNTER_REJECTED)
+        redis.incr(COUNTER_DEAD)
+    }
+
     /** Move every dead-lettered batch back to the retry list. Returns how many were moved. */
     suspend fun replayDeadLetters(limit: Int = 1000): Int {
         var moved = 0
@@ -103,6 +114,7 @@ class PulseQueue(private val redis: RedisClient) {
         consumed = counter(COUNTER_CONSUMED),
         failed = counter(COUNTER_FAILED),
         dead = counter(COUNTER_DEAD),
+        rejected = counter(COUNTER_REJECTED),
     )
 
     private suspend fun counter(key: String): Long = redis.getValue(key)?.toLongOrNull() ?: 0L
@@ -119,7 +131,13 @@ class PulseQueue(private val redis: RedisClient) {
     data class QueueDepth(val work: Int, val retry: Int, val dead: Int, val truncatedAt: Int)
 
     @Serializable
-    data class QueueCounters(val enqueued: Long, val consumed: Long, val failed: Long, val dead: Long)
+    data class QueueCounters(
+        val enqueued: Long,
+        val consumed: Long,
+        val failed: Long,
+        val dead: Long,
+        val rejected: Long = 0,
+    )
 
     companion object {
         /** Batches waiting for a first attempt. */
@@ -133,6 +151,7 @@ class PulseQueue(private val redis: RedisClient) {
         private const val COUNTER_CONSUMED = "pulse:ingest:stat:consumed"
         private const val COUNTER_FAILED = "pulse:ingest:stat:failed"
         private const val COUNTER_DEAD = "pulse:ingest:stat:dead"
+        private const val COUNTER_REJECTED = "pulse:ingest:stat:rejected"
 
         private const val DEPTH_PROBE = 5_000
 
