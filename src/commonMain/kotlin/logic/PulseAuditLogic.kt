@@ -3,6 +3,7 @@ package logic
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import model.AlertKind
 import model.AlertStatus
 import model.AuditSeverity
 import model.PulseApp
@@ -92,35 +93,88 @@ class PulseAuditLogic(private val log: Logger) {
      * record, the alert is a derived view of it, and a failure here must not cost the event.
      */
     suspend fun evaluate(rows: List<PulseEvent>, nowMs: Long) {
-        val inventories = rows.filter { it.kind == "Runtime" && it.name == "module_inventory" }
-        if (inventories.isEmpty()) return
+        val runtime = rows.filter { it.kind == "Runtime" }
+        if (runtime.isEmpty()) return
 
         val rules = PulseModuleRuleTable.query { }.list()
         if (rules.isEmpty()) return
 
+        evaluateInventories(runtime.filter { it.name == "module_inventory" }, rules, nowMs)
+        evaluateBehaviours(runtime, rules, nowMs)
+    }
+
+    /**
+     * Sensitive API calls the monitor attributed to a module.
+     *
+     * Judged against the same rules as the structural findings, because the question is the same
+     * one — is this module worth knowing about — and maintaining two rule sets would mean an
+     * operator who blocked an SDK structurally still has to remember to block its behaviour.
+     *
+     * Events not produced by the monitor are ignored: the inventory events carry no api_class, and
+     * a host calling recordBehavior by hand is free-form and has no module to judge.
+     */
+    private suspend fun evaluateBehaviours(rows: List<PulseEvent>, rules: List<PulseModuleRule>, nowMs: Long) {
+        for (row in rows) {
+            val apiClass = attribute(row.attributes, "api_class") ?: continue
+            val moduleName = row.sourceModule?.takeIf { it.isNotBlank() } ?: continue
+            val appId = appIdFor(row.projectId)
+            val rule = ModuleMatcher.bestMatch(moduleName, rules, appId) ?: continue
+            val calls = attribute(row.attributes, "call_count")?.toLongOrNull() ?: 1L
+            recordAlert(
+                row = row, moduleName = moduleName, rule = rule, nowMs = nowMs,
+                kind = AlertKind.BEHAVIOR,
+                api = row.name,
+                apiClass = apiClass,
+                calls = calls,
+            )
+        }
+    }
+
+    private suspend fun evaluateInventories(inventories: List<PulseEvent>, rules: List<PulseModuleRule>, nowMs: Long) {
         for (row in inventories) {
             val reported = ModuleMatcher.parseReportedModules(attribute(row.attributes, "bundled_modules"))
             if (reported.isEmpty()) continue
             val appId = appIdFor(row.projectId)
             for (moduleName in reported) {
                 val rule = ModuleMatcher.bestMatch(moduleName, rules, appId) ?: continue
-                recordAlert(row, moduleName, rule, nowMs)
+                recordAlert(row, moduleName, rule, nowMs, kind = AlertKind.MODULE)
             }
         }
     }
 
-    private suspend fun recordAlert(row: PulseEvent, moduleName: String, rule: PulseModuleRule, nowMs: Long) {
+    private suspend fun recordAlert(
+        row: PulseEvent,
+        moduleName: String,
+        rule: PulseModuleRule,
+        nowMs: Long,
+        kind: String,
+        api: String? = null,
+        apiClass: String? = null,
+        calls: Long = 0,
+    ) {
         val projectId = row.projectId ?: ""
+        // Keyed on the API too: "SDWebImage ships in this app", "SDWebImage read the clipboard"
+        // and "SDWebImage read the advertising id" are three separate findings, and folding them
+        // into one row would let the newest overwrite whatever came before.
         val existing = PulseModuleAlertTable.query {
-            where { and(PulseModuleAlert::projectId eq projectId, PulseModuleAlert::moduleName eq moduleName) }
-        }.list().firstOrNull()
+            where {
+                and(
+                    PulseModuleAlert::projectId eq projectId,
+                    PulseModuleAlert::moduleName eq moduleName,
+                    PulseModuleAlert::kind eq kind,
+                )
+            }
+        }.list().firstOrNull { it.api == api }
 
         val alertId: Long
         if (existing == null) {
             alertId = PulseModuleAlertTable.insert(
                 PulseModuleAlert(
                     projectId = projectId, moduleName = moduleName, ruleId = rule.id,
-                    severity = rule.severity, label = rule.label, note = rule.note,
+                    kind = kind, api = api, callCount = calls,
+                    severity = rule.severity,
+                    label = if (apiClass != null) "${rule.label} · $apiClass" else rule.label,
+                    note = rule.note,
                     firstSeenAt = nowMs, lastSeenAt = nowMs, occurrences = 1, deviceCount = 0,
                     status = AlertStatus.OPEN,
                 ),
@@ -132,8 +186,10 @@ class PulseAuditLogic(private val log: Logger) {
                 existing.copy(
                     // The rule may have been re-graded since this alert was raised; the alert
                     // should reflect the current judgement, not the one at first sighting.
-                    ruleId = rule.id, severity = rule.severity, label = rule.label, note = rule.note,
+                    ruleId = rule.id, severity = rule.severity, note = rule.note,
+                    label = if (apiClass != null) "${rule.label} · $apiClass" else rule.label,
                     lastSeenAt = nowMs, occurrences = existing.occurrences + 1,
+                    callCount = existing.callCount + calls,
                 ),
             )
         }
@@ -165,7 +221,7 @@ class PulseAuditLogic(private val log: Logger) {
         return PulseAppTable.query { where { PulseApp::appKey eq key } }.list().firstOrNull()?.id
     }
 
-    private fun attribute(attributes: String, key: String): String? = try {
+    internal fun attribute(attributes: String, key: String): String? = try {
         json.decodeFromString(JsonObject.serializer(), attributes)[key]?.jsonPrimitive?.content
     } catch (_: Throwable) {
         null

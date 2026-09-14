@@ -58,6 +58,12 @@ data class PulseModuleAlert(
     @Id val id: Long = 0,
     val projectId: String = "",
     val moduleName: String,
+    /** [AlertKind] — whether this is about what shipped or about what it did. */
+    val kind: String = AlertKind.MODULE,
+    /** The sensitive API for a behaviour alert; null for a structural one. */
+    val api: String? = null,
+    /** Total observed calls for a behaviour alert; 0 for a structural one. */
+    val callCount: Long = 0,
     val ruleId: Long? = null,
     val severity: String = AuditSeverity.INFO,
     val label: String = "",
@@ -73,6 +79,17 @@ data class PulseModuleAlert(
     @CreatedAt val createdAt: Long? = null,
     @UpdatedAt val updatedAt: Long? = null,
 )
+
+object AlertKind {
+    /** The module ships inside the app. Determined at release, changes slowly. */
+    const val MODULE = "module"
+    /**
+     * The module called a sensitive API at runtime. The same build can behave differently for
+     * different users and paths, so this is kept separate from the structural finding rather than
+     * overwriting it.
+     */
+    const val BEHAVIOR = "behavior"
+}
 
 object AlertStatus {
     const val OPEN = 0
