@@ -2,6 +2,7 @@ package ingest
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -49,6 +50,33 @@ data class IngestIdentity(
     val packageName: String? = null,
 )
 
+/**
+ * Response envelope for every Pulse msgtrans request. This belongs to the Pulse application
+ * protocol; msgtrans itself deliberately transports opaque bytes.
+ */
+@Serializable
+data class PulseWireResponse<T>(
+    val code: Int = 0,
+    val msg: String? = null,
+    val data: T? = null,
+)
+
+/**
+ * Update response keeps the old root-level fields during the beta migration. Old SDKs read those
+ * fields; new SDKs read [code]/[msg]/[data]. Every response still has the common envelope.
+ */
+@Serializable
+data class PulseUpdateResponse(
+    val code: Int = 0,
+    val msg: String? = null,
+    val data: logic.UpdateCheckResult? = null,
+    val action: String = data?.action ?: logic.UpdateAction.NONE,
+    val latestVersionName: String? = data?.latestVersionName,
+    val latestBuildNumber: Long? = data?.latestBuildNumber,
+    val releaseNotes: String = data?.releaseNotes ?: "",
+    val downloadUrl: String? = data?.downloadUrl,
+)
+
 /** Decodes a batch and maps it to persistable rows. */
 object IngestCodec {
     val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -91,6 +119,24 @@ object IngestCodec {
             packageName = batch.identity.packageName,
         )
     }
+
+    fun encodeUploadResponse(response: PulseWireResponse<Boolean>): ByteArray =
+        json.encodeToString(
+            PulseWireResponse.serializer(Boolean.serializer()),
+            response,
+        ).encodeToByteArray()
+
+    fun encodeUpdateResponse(response: PulseWireResponse<logic.UpdateCheckResult>): ByteArray =
+        json.encodeToString(
+            PulseUpdateResponse.serializer(),
+            PulseUpdateResponse(response.code, response.msg, response.data),
+        ).encodeToByteArray()
+
+    fun encodeEmptyResponse(response: PulseWireResponse<Unit>): ByteArray =
+        json.encodeToString(
+            PulseWireResponse.serializer(Unit.serializer()),
+            response,
+        ).encodeToByteArray()
 
     private val IMAGE_UUID = Regex(
         "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",

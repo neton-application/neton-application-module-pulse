@@ -1,8 +1,13 @@
 package ingest
 
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * The wire is the contract between the SDK and this server, and the two ship independently, so
@@ -67,5 +72,31 @@ class IngestCodecTest {
         val payload = envelope.replace("00112233-4455-6677-8899-aabbccddeeff", "not-a-uuid")
         val row = IngestCodec.toRows(IngestCodec.decodeBatch(payload.encodeToByteArray())).single()
         assertNull(row.sourceImageUuid)
+    }
+
+    @Test
+    fun uploadAcknowledgementUsesTheCommonResponseEnvelope() {
+        val encoded = IngestCodec.encodeUploadResponse(PulseWireResponse(code = 0, data = true))
+            .decodeToString()
+        val json = IngestCodec.json.parseToJsonElement(encoded).jsonObject
+        assertEquals(0, json.getValue("code").jsonPrimitive.int)
+        assertTrue(json.getValue("msg") is kotlinx.serialization.json.JsonNull)
+        assertTrue(json.getValue("data").jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun updateResponseSupportsNewEnvelopeAndExistingClients() {
+        val update = logic.UpdateCheckResult(
+            action = logic.UpdateAction.OPTIONAL,
+            latestVersionName = "1.1.0",
+            latestBuildNumber = 11,
+        )
+        val json = IngestCodec.json.parseToJsonElement(
+            IngestCodec.encodeUpdateResponse(PulseWireResponse(code = 0, data = update)).decodeToString(),
+        ).jsonObject
+        assertEquals(0, json.getValue("code").jsonPrimitive.int)
+        assertEquals("optional", json.getValue("data").jsonObject.getValue("action").jsonPrimitive.content)
+        assertEquals("optional", json.getValue("action").jsonPrimitive.content)
+        assertEquals("1.1.0", json.getValue("latestVersionName").jsonPrimitive.content)
     }
 }

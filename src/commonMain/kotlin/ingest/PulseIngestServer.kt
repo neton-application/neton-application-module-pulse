@@ -17,7 +17,6 @@ import neton.core.component.NetonLifecycle
 import neton.logging.Logger
 import logic.PulseAppLogic
 import queue.PulseQueue
-import logic.UpdateAction
 import logic.UpdateCheckResult
 import platform.posix.getenv
 import kotlin.native.concurrent.TransferMode
@@ -68,9 +67,16 @@ class PulseIngestServer(
         // Main-scope coroutine: put received batches on the queue and report the outcome back.
         scope.launch {
             for (pending in batches) {
-                val ok = try {
+                val decoded = try {
+                    IngestCodec.decodeBatch(pending.payload)
+                } catch (t: Throwable) {
+                    log.warn("pulse ingest rejected malformed batch: ${t.message}")
+                    pending.reply.complete(PulseWireResponse(400, "invalid event batch", false))
+                    continue
+                }
+                val response = try {
                     val text = pending.payload.decodeToString()
-                    val identity = IngestCodec.decodeBatch(pending.payload).identity
+                    val identity = decoded.identity
                     val rejected = apps.ingestRejection(
                         identity.projectId, identity.platform, identity.packageName,
                     )
@@ -83,12 +89,12 @@ class PulseIngestServer(
                         queue.reject(text, rejected, nowMs())
                         log.warn("pulse ingest rejected: $rejected")
                     }
-                    true
+                    PulseWireResponse(code = 0, data = true)
                 } catch (t: Throwable) {
                     log.warn("pulse ingest enqueue failed: ${t.message}")
-                    false
+                    PulseWireResponse(code = 503, msg = "event queue unavailable", data = false)
                 }
-                pending.accepted.complete(ok)
+                pending.reply.complete(response)
             }
         }
         // Main-scope coroutine: answer update checks, which need the database.
@@ -97,14 +103,14 @@ class PulseIngestServer(
                 val answer = try {
                     val req = IngestCodec.json.decodeFromString(UpdateCheckRequest.serializer(), query.payload.decodeToString())
                     val result = apps.checkUpdate(req.platform, req.appKey, req.packageName, req.buildNumber)
-                    IngestCodec.json.encodeToString(UpdateCheckResult.serializer(), result)
+                    PulseWireResponse(code = 0, data = result)
                 } catch (t: Throwable) {
-                    // A malformed or failing check must not stop the client from starting, so it
-                    // is answered with "no update" rather than an error the client has to handle.
                     log.warn("pulse update check failed: ${t.message}")
-                    IngestCodec.json.encodeToString(UpdateCheckResult.serializer(), UpdateCheckResult(UpdateAction.NONE))
+                    // The client treats any non-zero response as "no update", so startup remains
+                    // fail-open while the wire still reports the failure honestly.
+                    PulseWireResponse<UpdateCheckResult>(code = 500, msg = "update check failed")
                 }
-                query.reply.complete(answer.encodeToByteArray())
+                query.reply.complete(IngestCodec.encodeUpdateResponse(answer))
             }
         }
         // Reactor worker: msgtrans server. onRequest hands the payload to the channel and acks.
@@ -119,19 +125,23 @@ class PulseIngestServer(
                             PulseBizType.APP_UPDATE_CHECK -> {
                                 val reply = CompletableDeferred<ByteArray>()
                                 if (queries.trySend(UpdateQuery(payload, reply)).isSuccess) reply.await()
-                                else EMPTY_ACK   // overloaded: answer nothing rather than block the client
+                                else IngestCodec.encodeUpdateResponse(
+                                    PulseWireResponse(code = 429, msg = "update service overloaded"),
+                                )
                             }
                             PulseBizType.EVENT_BATCH_UPLOAD -> {
                                 // Acknowledge only once the batch is on the queue. Throwing here
                                 // fails the client's request, which is exactly what makes it keep
                                 // the batch and send it again — an ack has to mean "durable".
-                                val accepted = CompletableDeferred<Boolean>()
-                                val handed = channel.trySend(PendingBatch(payload, accepted)).isSuccess
-                                if (!handed) throw IngestOverloadedException()
-                                if (!accepted.await()) throw IngestOverloadedException()
-                                EMPTY_ACK
+                                val reply = CompletableDeferred<PulseWireResponse<Boolean>>()
+                                val handed = channel.trySend(PendingBatch(payload, reply)).isSuccess
+                                val response = if (handed) reply.await() else
+                                    PulseWireResponse(code = 429, msg = "ingest overloaded", data = false)
+                                IngestCodec.encodeUploadResponse(response)
                             }
-                            else -> throw UnsupportedBizTypeException(bizType)
+                            else -> IngestCodec.encodeEmptyResponse(
+                                PulseWireResponse(code = 404, msg = "unsupported pulse biz_type=$bizType"),
+                            )
                         }
                     }
                 }
@@ -161,20 +171,14 @@ class PulseIngestServer(
     private class UpdateQuery(val payload: ByteArray, val reply: CompletableDeferred<ByteArray>)
 
     /** One batch in flight: the raw payload and whether it made it onto the queue. */
-    private class PendingBatch(val payload: ByteArray, val accepted: CompletableDeferred<Boolean>)
-
-    /** Signals the client that the batch was not taken, so it keeps it and retries. */
-    private class IngestOverloadedException :
-        Exception("pulse ingest is overloaded; batch not accepted")
-
-    /** Unknown application messages are rejected instead of being mistaken for telemetry. */
-    private class UnsupportedBizTypeException(bizType: Int) :
-        Exception("unsupported pulse biz_type=$bizType")
+    private class PendingBatch(
+        val payload: ByteArray,
+        val reply: CompletableDeferred<PulseWireResponse<Boolean>>,
+    )
 
     private fun nowMs(): Long = kotlin.time.Clock.System.now().toEpochMilliseconds()
 
     companion object {
-        private val EMPTY_ACK = ByteArray(0)
         fun defaultPort(): Int = getenv("PULSE_INGEST_PORT")?.toKString()?.toIntOrNull() ?: 6000
     }
 }
