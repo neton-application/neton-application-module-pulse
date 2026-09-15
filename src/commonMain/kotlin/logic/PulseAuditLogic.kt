@@ -80,7 +80,7 @@ class PulseAuditLogic(
             """
             WITH filtered AS (
                 SELECT *, CASE
-                    WHEN attributes ~ '^\\s*\\{' THEN attributes::jsonb
+                    WHEN LEFT(LTRIM(attributes), 1) = '{' THEN attributes::jsonb
                     ELSE '{}'::jsonb
                 END AS attrs
                 FROM pulse_events
