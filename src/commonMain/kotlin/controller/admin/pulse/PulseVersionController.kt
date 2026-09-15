@@ -19,7 +19,10 @@ class PulseVersionController(private val versions: PulseVersionLogic) {
 
     @Get("/list")
     @Permission("pulse:stats:view")
-    suspend fun list(@Query projectId: String? = null): List<VersionStats> = versions.builds(projectId)
+    suspend fun list(
+        @Query projectId: String? = null,
+        @Query days: Int? = null,
+    ): List<VersionStats> = versions.builds(projectId, days)
 
     /**
      * One build against another. [baselineBuild] defaults to the previous build that actually
@@ -31,5 +34,6 @@ class PulseVersionController(private val versions: PulseVersionLogic) {
         @Query buildNumber: Long,
         @Query baselineBuild: Long? = null,
         @Query projectId: String? = null,
-    ): VersionComparison = versions.compare(projectId, buildNumber, baselineBuild)
+        @Query days: Int? = null,
+    ): VersionComparison = versions.compare(projectId, buildNumber, baselineBuild, days)
 }

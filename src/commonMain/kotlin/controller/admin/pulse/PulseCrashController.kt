@@ -43,9 +43,14 @@ class PulseCrashController(private val crashes: PulseCrashLogic) {
         @Query pageNo: Int = 1,
         @Query pageSize: Int = 20,
         @Query status: Int? = null,
+        @Query projectId: String? = null,
+        @Query days: Int? = null,
     ): PageResponse<PulseCrashIssue> {
         val size = pageSize.coerceIn(1, 200); val no = pageNo.coerceAtLeast(1)
-        val all = crashes.listIssues(status)
+        val since = days?.coerceIn(1, 30)?.let {
+            kotlin.time.Clock.System.now().toEpochMilliseconds() - it * 86_400_000L
+        }
+        val all = crashes.listIssues(status, projectId, since)
         val window = all.drop((no - 1) * size).take(size)
         val pages = if (all.isEmpty()) 0 else (all.size + size - 1) / size
         return PageResponse(window, all.size.toLong(), no, size, pages)

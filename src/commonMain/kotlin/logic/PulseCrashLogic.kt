@@ -152,9 +152,19 @@ class PulseCrashLogic(
 
     /** Most impactful first: devices affected, then recency. Not raw event count — one device */
     /** crashing in a loop is not more important than a thousand devices crashing once. */
-    suspend fun listIssues(status: Int? = null): List<PulseCrashIssue> =
+    suspend fun listIssues(
+        status: Int? = null,
+        projectId: String? = null,
+        sinceMs: Long? = null,
+    ): List<PulseCrashIssue> =
         PulseCrashIssueTable.query {
-            where { whenPresent(status) { PulseCrashIssue::status eq it } }
+            where {
+                and(
+                    whenPresent(status) { PulseCrashIssue::status eq it },
+                    whenPresent(projectId?.takeIf { it.isNotBlank() }) { PulseCrashIssue::projectId eq it },
+                    whenPresent(sinceMs) { PulseCrashIssue::lastSeenAt ge it },
+                )
+            }
         }.list().sortedWith(
             compareByDescending<PulseCrashIssue> { it.deviceCount }.thenByDescending { it.lastSeenAt },
         )

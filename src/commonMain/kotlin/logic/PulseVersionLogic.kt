@@ -89,12 +89,19 @@ class PulseVersionLogic(
 ) {
 
     /** Every build that has reported anything, newest first. */
-    suspend fun builds(projectId: String?): List<VersionStats> {
+    suspend fun builds(projectId: String?, days: Int? = null): List<VersionStats> {
         val where = StringBuilder("build_number IS NOT NULL")
         val params = HashMap<String, Any?>()
         if (!projectId.isNullOrBlank()) {
             where.append(" AND project_id = :project_id")
             params["project_id"] = projectId
+        }
+        val sinceMs = days?.coerceIn(1, 30)?.let {
+            kotlin.time.Clock.System.now().toEpochMilliseconds() - it * 86_400_000L
+        }
+        if (sinceMs != null) {
+            where.append(" AND ts >= :since_ms")
+            params["since_ms"] = sinceMs
         }
 
         val rows = db.fetchAll(
@@ -117,7 +124,7 @@ class PulseVersionLogic(
             params,
         )
 
-        val newPerBuild = newIssueCounts(projectId)
+        val newPerBuild = newIssueCounts(projectId, sinceMs)
         return rows.map { r ->
             val build = r.long("build_number")
             VersionStats(
@@ -144,8 +151,13 @@ class PulseVersionLogic(
      * buildNumber - 1: builds that were never released have no data and comparing against an empty
      * one would report a 100% crash-free baseline and a catastrophic-looking regression.
      */
-    suspend fun compare(projectId: String?, buildNumber: Long, baselineBuild: Long?): VersionComparison {
-        val all = builds(projectId)
+    suspend fun compare(
+        projectId: String?,
+        buildNumber: Long,
+        baselineBuild: Long?,
+        days: Int? = null,
+    ): VersionComparison {
+        val all = builds(projectId, days)
         val current = all.firstOrNull { it.buildNumber == buildNumber }
             ?: VersionStats(buildNumber = buildNumber)
         val baseline = when {
@@ -159,7 +171,7 @@ class PulseVersionLogic(
             crashFreeDeviceDelta = baseline?.let { current.crashFreeDeviceRate - it.crashFreeDeviceRate } ?: 0.0,
             crashFreeSessionDelta = baseline?.let { current.crashFreeSessionRate - it.crashFreeSessionRate } ?: 0.0,
             regressions = if (baseline == null) emptyList()
-            else regressions(projectId, buildNumber, baseline.buildNumber),
+            else regressions(projectId, buildNumber, baseline.buildNumber, days),
         )
     }
 
@@ -169,7 +181,12 @@ class PulseVersionLogic(
      * Matched through the crash sightings table, which records the build each device hit an issue
      * on. Going via the events would require re-deriving fingerprints on read.
      */
-    suspend fun regressions(projectId: String?, buildNumber: Long, baselineBuild: Long): List<IssueOnBuild> {
+    suspend fun regressions(
+        projectId: String?,
+        buildNumber: Long,
+        baselineBuild: Long,
+        days: Int? = null,
+    ): List<IssueOnBuild> {
         val params = HashMap<String, Any?>()
         params["build"] = buildNumber
         params["baseline"] = baselineBuild
@@ -177,6 +194,10 @@ class PulseVersionLogic(
             params["project_id"] = projectId
             "AND i.project_id = :project_id"
         } else ""
+        val sinceFilter = days?.coerceIn(1, 30)?.let {
+            params["since_ms"] = kotlin.time.Clock.System.now().toEpochMilliseconds() - it * 86_400_000L
+            "AND s.last_seen_at >= :since_ms"
+        } ?: ""
 
         val rows = db.fetchAll(
             """
@@ -190,6 +211,7 @@ class PulseVersionLogic(
                 WHERE b.issue_id = i.id AND b.build_number = :baseline
             )
             $projectFilter
+            $sinceFilter
             GROUP BY i.id, i.title, i.message, i.fingerprint, i.event_count
             ORDER BY devices DESC
             """.trimIndent(),
@@ -208,12 +230,18 @@ class PulseVersionLogic(
     }
 
     /** Per build, how many issues were first seen there. */
-    private suspend fun newIssueCounts(projectId: String?): Map<Long, Long> {
+    private suspend fun newIssueCounts(projectId: String?, sinceMs: Long?): Map<Long, Long> {
         val params = HashMap<String, Any?>()
-        val projectFilter = if (!projectId.isNullOrBlank()) {
+        val filters = mutableListOf<String>()
+        if (!projectId.isNullOrBlank()) {
             params["project_id"] = projectId
-            "WHERE i.project_id = :project_id"
-        } else ""
+            filters += "i.project_id = :project_id"
+        }
+        if (sinceMs != null) {
+            params["since_ms"] = sinceMs
+            filters += "s.first_seen_at >= :since_ms"
+        }
+        val filterSql = if (filters.isEmpty()) "" else "WHERE ${filters.joinToString(" AND ")}"
 
         // The build an issue was first seen on is the lowest build among its sightings; an issue
         // that pre-dates build reporting has none and is counted against no build.
@@ -223,7 +251,7 @@ class PulseVersionLogic(
                 SELECT s.issue_id, MIN(s.build_number) AS first_build
                 FROM pulse_crash_sightings s
                 JOIN pulse_crash_issues i ON i.id = s.issue_id
-                $projectFilter
+                $filterSql
                 GROUP BY s.issue_id
             ) t
             WHERE first_build IS NOT NULL

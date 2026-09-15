@@ -125,7 +125,7 @@ class PulseQueryLogic(
             DomainCount(d.id, d.kinds.sumOf { kindCounts[it] ?: 0L })
         }
 
-        val daysSafe = days.coerceIn(7, 30)
+        val daysSafe = days.coerceIn(1, 30)
         val trendParams = HashMap(params)
         trendParams["days_minus_one"] = daysSafe - 1
         val activeTrend = db.fetchAll(

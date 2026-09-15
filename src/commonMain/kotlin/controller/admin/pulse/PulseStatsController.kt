@@ -12,5 +12,5 @@ class PulseStatsController(private val query: PulseQueryLogic) {
     suspend fun overview(
         @Query projectId: String? = null,
         @Query days: Int = 7,
-    ): PulseOverview = query.overview(projectId, days.coerceIn(7, 30))
+    ): PulseOverview = query.overview(projectId, days.coerceIn(1, 30))
 }
