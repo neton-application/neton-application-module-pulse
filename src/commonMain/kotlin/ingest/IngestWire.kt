@@ -158,8 +158,21 @@ data class UpdateCheckRequest(
 
 /** Business types on the ingest connection. */
 object PulseBizType {
+    /** Invalid/default value. */
+    const val RESERVED = 0
     /** Upload one identity envelope containing an ordered event array. */
     const val EVENT_BATCH_UPLOAD = 1
     /** A startup update check. */
     const val APP_UPDATE_CHECK = 2
+    /** Register/authenticate this connection and advertise SDK capabilities. */
+    const val SESSION_REGISTER = 3
+    /** Upload one or more high-priority crash reports. */
+    const val CRASH_BATCH_UPLOAD = 4
+    /** Pull sampling, audit and collection configuration. */
+    const val CONFIG_PULL = 5
+    /** Keep a registered mobile connection alive. */
+    const val HEARTBEAT = 6
+    /** Bidirectional routed control request. */
+    const val CONTROL_RPC = 7
+
 }

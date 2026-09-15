@@ -139,6 +139,14 @@ class PulseIngestServer(
                                     PulseWireResponse(code = 429, msg = "ingest overloaded", data = false)
                                 IngestCodec.encodeUploadResponse(response)
                             }
+                            PulseBizType.SESSION_REGISTER,
+                            PulseBizType.CRASH_BATCH_UPLOAD,
+                            PulseBizType.CONFIG_PULL,
+                            PulseBizType.HEARTBEAT,
+                            PulseBizType.CONTROL_RPC,
+                            -> IngestCodec.encodeEmptyResponse(
+                                PulseWireResponse(code = 501, msg = "pulse biz_type=$bizType is allocated but not implemented"),
+                            )
                             else -> IngestCodec.encodeEmptyResponse(
                                 PulseWireResponse(code = 404, msg = "unsupported pulse biz_type=$bizType"),
                             )
