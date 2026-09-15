@@ -9,5 +9,8 @@ import neton.core.annotations.*
 class PulseStatsController(private val query: PulseQueryLogic) {
     @Get("/overview")
     @Permission("pulse:stats:view")
-    suspend fun overview(): PulseOverview = query.overview()
+    suspend fun overview(
+        @Query projectId: String? = null,
+        @Query days: Int = 7,
+    ): PulseOverview = query.overview(projectId, days.coerceIn(7, 30))
 }
