@@ -113,7 +113,7 @@ class PulseAuditLogic(
                        END),
                        COUNT(DISTINCT device_id), MIN(ts), MAX(ts)
                 FROM filtered
-                WHERE attrs ? 'api_class'
+                WHERE NULLIF(attrs->>'api_class', '') IS NOT NULL
                   AND name <> 'network_request'
                   AND name NOT LIKE '%permission_request'
                 GROUP BY name, source_module, attrs->>'api_class', attrs->>'api_selector'
