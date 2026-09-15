@@ -11,6 +11,7 @@ import model.PulseEvent
 import model.PulseModuleAlert
 import model.PulseModuleRule
 import model.PulseModuleSighting
+import neton.database.api.DbContext
 import neton.core.http.BadRequestException
 import neton.database.dsl.*
 import neton.logging.Logger
@@ -18,6 +19,28 @@ import table.PulseAppTable
 import table.PulseModuleAlertTable
 import table.PulseModuleRuleTable
 import table.PulseModuleSightingTable
+
+@kotlinx.serialization.Serializable
+data class PulseAuditEvidenceItem(
+    val category: String,
+    val name: String,
+    val moduleName: String? = null,
+    val detail: String? = null,
+    val occurrences: Long = 0,
+    val devices: Long = 0,
+    val firstSeenAt: Long = 0,
+    val lastSeenAt: Long = 0,
+)
+
+@kotlinx.serialization.Serializable
+data class PulseAuditEvidence(
+    val projectId: String? = null,
+    val days: Int,
+    val modules: List<PulseAuditEvidenceItem>,
+    val networkDestinations: List<PulseAuditEvidenceItem>,
+    val sensitiveApis: List<PulseAuditEvidenceItem>,
+    val permissions: List<PulseAuditEvidenceItem>,
+)
 
 /**
  * Third-party module auditing.
@@ -31,7 +54,104 @@ import table.PulseModuleSightingTable
  * counts — how often and how many devices — not ten thousand rows.
  */
 @neton.core.annotations.Logic(logger = "logic.pulse-audit")
-class PulseAuditLogic(private val log: Logger) {
+class PulseAuditLogic(
+    private val db: DbContext,
+    private val log: Logger,
+) {
+
+    /**
+     * Observed facts, independent from policy rules.
+     *
+     * A rule decides whether evidence deserves an alert; it must never decide whether an operator
+     * can see the evidence at all. Aggregation stays in PostgreSQL so this page does not turn into
+     * a bounded recent-event sample as the event table grows.
+     */
+    suspend fun evidence(projectId: String?, days: Int): PulseAuditEvidence {
+        val daysSafe = days.coerceIn(1, 30)
+        val params = hashMapOf<String, Any?>(
+            "since_ms" to kotlin.time.Clock.System.now().toEpochMilliseconds() - daysSafe * 86_400_000L,
+        )
+        val projectFilter = if (!projectId.isNullOrBlank()) {
+            params["project_id"] = projectId
+            "AND project_id = :project_id"
+        } else ""
+
+        val rows = db.fetchAll(
+            """
+            WITH filtered AS (
+                SELECT *, CASE
+                    WHEN attributes ~ '^\\s*\\{' THEN attributes::jsonb
+                    ELSE '{}'::jsonb
+                END AS attrs
+                FROM pulse_events
+                WHERE kind = 'Runtime' AND ts >= :since_ms $projectFilter
+            ), evidence AS (
+                SELECT 'module' AS category,
+                       COALESCE(NULLIF(source_module, ''), 'unknown') AS name,
+                       NULLIF(source_module, '') AS module_name,
+                       COALESCE(NULLIF(attrs->>'relative_path', ''), NULLIF(source_image_uuid, '')) AS detail,
+                       COUNT(*) AS occurrences, COUNT(DISTINCT device_id) AS devices,
+                       MIN(ts) AS first_seen_at, MAX(ts) AS last_seen_at
+                FROM filtered WHERE name = 'module_artifact'
+                GROUP BY source_module, attrs->>'relative_path', source_image_uuid
+
+                UNION ALL
+
+                SELECT 'network', COALESCE(NULLIF(attrs->>'detail', ''), 'unknown endpoint'),
+                       NULLIF(source_module, ''), NULLIF(attrs->>'detail', ''),
+                       COUNT(*), COUNT(DISTINCT device_id), MIN(ts), MAX(ts)
+                FROM filtered WHERE name = 'network_request'
+                GROUP BY source_module, attrs->>'detail'
+
+                UNION ALL
+
+                SELECT 'api', name, NULLIF(source_module, ''),
+                       CONCAT_WS(' · ', NULLIF(attrs->>'api_class', ''), NULLIF(attrs->>'api_selector', '')),
+                       SUM(CASE
+                           WHEN attrs->>'call_count' ~ '^[0-9]+$' THEN (attrs->>'call_count')::bigint
+                           ELSE 1
+                       END),
+                       COUNT(DISTINCT device_id), MIN(ts), MAX(ts)
+                FROM filtered
+                WHERE attrs ? 'api_class'
+                  AND name <> 'network_request'
+                  AND name NOT LIKE '%permission_request'
+                GROUP BY name, source_module, attrs->>'api_class', attrs->>'api_selector'
+
+                UNION ALL
+
+                SELECT 'permission', name, NULLIF(source_module, ''), attrs::text,
+                       COUNT(*), COUNT(DISTINCT device_id), MIN(ts), MAX(ts)
+                FROM filtered
+                WHERE name LIKE '%permission_request'
+                   OR name IN ('privacy_declarations', 'privacy_manifest', 'signing_declarations')
+                GROUP BY name, source_module, attrs::text
+            )
+            SELECT * FROM evidence ORDER BY category, occurrences DESC, last_seen_at DESC
+            """.trimIndent(),
+            params,
+        ).map {
+            PulseAuditEvidenceItem(
+                category = it.string("category"),
+                name = it.string("name"),
+                moduleName = it.stringOrNull("module_name"),
+                detail = it.stringOrNull("detail"),
+                occurrences = it.long("occurrences"),
+                devices = it.long("devices"),
+                firstSeenAt = it.long("first_seen_at"),
+                lastSeenAt = it.long("last_seen_at"),
+            )
+        }
+
+        return PulseAuditEvidence(
+            projectId = projectId?.takeIf { it.isNotBlank() },
+            days = daysSafe,
+            modules = rows.filter { it.category == "module" },
+            networkDestinations = rows.filter { it.category == "network" },
+            sensitiveApis = rows.filter { it.category == "api" },
+            permissions = rows.filter { it.category == "permission" },
+        )
+    }
 
     // ---- rules
 
@@ -56,12 +176,17 @@ class PulseAuditLogic(private val log: Logger) {
 
     // ---- alerts
 
-    suspend fun listAlerts(status: Int? = null, severity: String? = null): List<PulseModuleAlert> =
+    suspend fun listAlerts(
+        status: Int? = null,
+        severity: String? = null,
+        projectId: String? = null,
+    ): List<PulseModuleAlert> =
         PulseModuleAlertTable.query {
             where {
                 and(
                     whenPresent(status) { PulseModuleAlert::status eq it },
                     whenPresent(severity?.takeIf { it.isNotBlank() }) { PulseModuleAlert::severity eq it },
+                    whenPresent(projectId?.takeIf { it.isNotBlank() }) { PulseModuleAlert::projectId eq it },
                 )
             }
             // Most severe first, then most recent: the console's first screen should be the things

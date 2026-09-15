@@ -3,6 +3,7 @@ package controller.admin.pulse
 import dto.PageResponse
 import kotlinx.serialization.Serializable
 import logic.PulseAuditLogic
+import logic.PulseAuditEvidence
 import model.AuditSeverity
 import model.PulseModuleAlert
 import model.PulseModuleRule
@@ -51,6 +52,14 @@ class PulseAuditController(private val audit: PulseAuditLogic) {
     @Permission("pulse:audit:list")
     suspend fun severities(): List<String> = AuditSeverity.ALL
 
+    /** Facts observed by the SDK, whether or not an alert rule currently matches them. */
+    @Get("/evidence")
+    @Permission("pulse:audit:list")
+    suspend fun evidence(
+        @Query projectId: String? = null,
+        @Query days: Int = 7,
+    ): PulseAuditEvidence = audit.evidence(projectId, days)
+
     // ---- rules
 
     @Get("/rule/page")
@@ -92,9 +101,10 @@ class PulseAuditController(private val audit: PulseAuditLogic) {
         @Query pageSize: Int = 20,
         @Query status: Int? = null,
         @Query severity: String? = null,
+        @Query projectId: String? = null,
     ): PageResponse<PulseModuleAlert> {
         val size = pageSize.coerceIn(1, 200); val no = pageNo.coerceAtLeast(1)
-        val all = audit.listAlerts(status, severity)
+        val all = audit.listAlerts(status, severity, projectId)
         val window = all.drop((no - 1) * size).take(size)
         val pages = if (all.isEmpty()) 0 else (all.size + size - 1) / size
         return PageResponse(window, all.size.toLong(), no, size, pages)
