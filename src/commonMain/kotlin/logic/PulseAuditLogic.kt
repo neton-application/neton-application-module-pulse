@@ -90,8 +90,8 @@ class PulseAuditLogic(
                        COALESCE(NULLIF(source_module, ''), 'unknown') AS name,
                        NULLIF(source_module, '') AS module_name,
                        COALESCE(NULLIF(attrs->>'relative_path', ''), NULLIF(source_image_uuid, '')) AS detail,
-                       COUNT(*) AS occurrences, COUNT(DISTINCT device_id) AS devices,
-                       MIN(ts) AS first_seen_at, MAX(ts) AS last_seen_at
+                       COUNT(*)::text AS occurrences, COUNT(DISTINCT device_id)::text AS devices,
+                       MIN(ts)::text AS first_seen_at, MAX(ts)::text AS last_seen_at
                 FROM filtered WHERE name = 'module_artifact'
                 GROUP BY source_module, attrs->>'relative_path', source_image_uuid
 
@@ -99,7 +99,7 @@ class PulseAuditLogic(
 
                 SELECT 'network', COALESCE(NULLIF(attrs->>'detail', ''), 'unknown endpoint'),
                        NULLIF(source_module, ''), NULLIF(attrs->>'detail', ''),
-                       COUNT(*), COUNT(DISTINCT device_id), MIN(ts), MAX(ts)
+                       COUNT(*)::text, COUNT(DISTINCT device_id)::text, MIN(ts)::text, MAX(ts)::text
                 FROM filtered WHERE name = 'network_request'
                 GROUP BY source_module, attrs->>'detail'
 
@@ -110,8 +110,8 @@ class PulseAuditLogic(
                        SUM(CASE
                            WHEN attrs->>'call_count' ~ '^[0-9]+$' THEN (attrs->>'call_count')::bigint
                            ELSE 1
-                       END),
-                       COUNT(DISTINCT device_id), MIN(ts), MAX(ts)
+                       END)::text,
+                       COUNT(DISTINCT device_id)::text, MIN(ts)::text, MAX(ts)::text
                 FROM filtered
                 WHERE NULLIF(attrs->>'api_class', '') IS NOT NULL
                   AND name <> 'network_request'
@@ -121,7 +121,7 @@ class PulseAuditLogic(
                 UNION ALL
 
                 SELECT 'permission', name, NULLIF(source_module, ''), attrs::text,
-                       COUNT(*), COUNT(DISTINCT device_id), MIN(ts), MAX(ts)
+                       COUNT(*)::text, COUNT(DISTINCT device_id)::text, MIN(ts)::text, MAX(ts)::text
                 FROM filtered
                 WHERE name LIKE '%permission_request'
                    OR name IN ('privacy_declarations', 'privacy_manifest', 'signing_declarations')
@@ -136,10 +136,10 @@ class PulseAuditLogic(
                 name = it.string("name"),
                 moduleName = it.stringOrNull("module_name"),
                 detail = it.stringOrNull("detail"),
-                occurrences = it.long("occurrences"),
-                devices = it.long("devices"),
-                firstSeenAt = it.long("first_seen_at"),
-                lastSeenAt = it.long("last_seen_at"),
+                occurrences = it.string("occurrences").toLongOrNull() ?: 0,
+                devices = it.string("devices").toLongOrNull() ?: 0,
+                firstSeenAt = it.string("first_seen_at").toLongOrNull() ?: 0,
+                lastSeenAt = it.string("last_seen_at").toLongOrNull() ?: 0,
             )
         }
 
