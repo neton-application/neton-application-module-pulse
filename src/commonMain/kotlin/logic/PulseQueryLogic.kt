@@ -70,6 +70,7 @@ class PulseQueryLogic(
 
     private companion object {
         const val SCAN_LIMIT = 5000
+        const val REPORTING_TIMEZONE = "Asia/Shanghai"
         val KINDS = listOf("Analytics", "Crash", "Error", "Log", "Network", "Performance", "Runtime", "Breadcrumb")
     }
 
@@ -86,7 +87,10 @@ class PulseQueryLogic(
             WITH filtered AS (
                 SELECT * FROM pulse_events $projectWhere
             ), bounds AS (
-                SELECT (extract(epoch FROM date_trunc('day', now())) * 1000)::bigint AS today_ms
+                SELECT (extract(epoch FROM (
+                    date_trunc('day', now() AT TIME ZONE '${REPORTING_TIMEZONE}')
+                    AT TIME ZONE '${REPORTING_TIMEZONE}'
+                )) * 1000)::bigint AS today_ms
             ), first_seen AS (
                 SELECT device_id, MIN(ts) AS first_ts
                 FROM filtered
@@ -103,7 +107,7 @@ class PulseQueryLogic(
                    COUNT(*) FILTER (WHERE ts >= bounds.today_ms AND name = 'app_launch') AS today_launches,
                    COUNT(*) FILTER (WHERE kind = 'Crash') AS crashes,
                    COUNT(*) FILTER (WHERE kind = 'Error') AS errors,
-                   current_setting('TIMEZONE') AS timezone
+                   '${REPORTING_TIMEZONE}' AS timezone
             FROM filtered CROSS JOIN bounds
             GROUP BY bounds.today_ms
             """.trimIndent(),
@@ -135,24 +139,24 @@ class PulseQueryLogic(
                 GROUP BY device_id
             ), days AS (
                 SELECT generate_series(
-                    date_trunc('day', now()) - (:days_minus_one * interval '1 day'),
-                    date_trunc('day', now()), interval '1 day'
+                    date_trunc('day', now() AT TIME ZONE '${REPORTING_TIMEZONE}') - (:days_minus_one * interval '1 day'),
+                    date_trunc('day', now() AT TIME ZONE '${REPORTING_TIMEZONE}'), interval '1 day'
                 ) AS day
             )
             SELECT to_char(day, 'YYYY-MM-DD') AS date,
                    (SELECT COUNT(DISTINCT device_id) FROM filtered
-                    WHERE ts >= (extract(epoch FROM day) * 1000)::bigint
-                      AND ts <  (extract(epoch FROM day + interval '1 day') * 1000)::bigint) AS active_users,
+                    WHERE ts >= (extract(epoch FROM (day AT TIME ZONE '${REPORTING_TIMEZONE}')) * 1000)::bigint
+                      AND ts <  (extract(epoch FROM ((day + interval '1 day') AT TIME ZONE '${REPORTING_TIMEZONE}')) * 1000)::bigint) AS active_users,
                    (SELECT COUNT(*) FROM first_seen
-                    WHERE first_ts >= (extract(epoch FROM day) * 1000)::bigint
-                      AND first_ts <  (extract(epoch FROM day + interval '1 day') * 1000)::bigint) AS new_users,
+                    WHERE first_ts >= (extract(epoch FROM (day AT TIME ZONE '${REPORTING_TIMEZONE}')) * 1000)::bigint
+                      AND first_ts <  (extract(epoch FROM ((day + interval '1 day') AT TIME ZONE '${REPORTING_TIMEZONE}')) * 1000)::bigint) AS new_users,
                    (SELECT COUNT(DISTINCT session_id) FROM filtered
-                    WHERE ts >= (extract(epoch FROM day) * 1000)::bigint
-                      AND ts <  (extract(epoch FROM day + interval '1 day') * 1000)::bigint) AS sessions,
+                    WHERE ts >= (extract(epoch FROM (day AT TIME ZONE '${REPORTING_TIMEZONE}')) * 1000)::bigint
+                      AND ts <  (extract(epoch FROM ((day + interval '1 day') AT TIME ZONE '${REPORTING_TIMEZONE}')) * 1000)::bigint) AS sessions,
                    (SELECT COUNT(*) FROM filtered
                     WHERE name = 'app_launch'
-                      AND ts >= (extract(epoch FROM day) * 1000)::bigint
-                      AND ts <  (extract(epoch FROM day + interval '1 day') * 1000)::bigint) AS launches
+                      AND ts >= (extract(epoch FROM (day AT TIME ZONE '${REPORTING_TIMEZONE}')) * 1000)::bigint
+                      AND ts <  (extract(epoch FROM ((day + interval '1 day') AT TIME ZONE '${REPORTING_TIMEZONE}')) * 1000)::bigint) AS launches
             FROM days ORDER BY day
             """.trimIndent(),
             trendParams,
@@ -174,7 +178,10 @@ class PulseQueryLogic(
             SELECT name, COUNT(*) AS count
             FROM pulse_events
             WHERE $topFilter kind = 'Analytics'
-              AND ts >= (extract(epoch FROM date_trunc('day', now()) - ((:days - 1) * interval '1 day')) * 1000)::bigint
+              AND ts >= (extract(epoch FROM (
+                    (date_trunc('day', now() AT TIME ZONE '${REPORTING_TIMEZONE}') - ((:days - 1) * interval '1 day'))
+                    AT TIME ZONE '${REPORTING_TIMEZONE}'
+                  )) * 1000)::bigint
             GROUP BY name ORDER BY count DESC LIMIT 10
             """.trimIndent(),
             topParams,
