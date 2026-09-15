@@ -89,11 +89,19 @@ class PulseAuditLogic(
                 SELECT 'module' AS category,
                        COALESCE(NULLIF(source_module, ''), 'unknown') AS name,
                        NULLIF(source_module, '') AS module_name,
-                       COALESCE(NULLIF(attrs->>'relative_path', ''), NULLIF(source_image_uuid, '')) AS detail,
+                       COALESCE(
+                           NULLIF(attrs->>'relative_path', ''),
+                           NULLIF(source_module, ''),
+                           NULLIF(source_image_uuid, '')
+                       ) AS detail,
                        COUNT(*)::text AS occurrences, COUNT(DISTINCT device_id)::text AS devices,
                        MIN(ts)::text AS first_seen_at, MAX(ts)::text AS last_seen_at
                 FROM filtered WHERE name = 'module_artifact'
-                GROUP BY source_module, attrs->>'relative_path', source_image_uuid
+                GROUP BY source_module, COALESCE(
+                    NULLIF(attrs->>'relative_path', ''),
+                    NULLIF(source_module, ''),
+                    NULLIF(source_image_uuid, '')
+                )
 
                 UNION ALL
 
