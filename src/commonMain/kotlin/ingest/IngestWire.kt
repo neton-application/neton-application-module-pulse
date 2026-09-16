@@ -50,6 +50,51 @@ data class IngestIdentity(
     val packageName: String? = null,
 )
 
+/** First request on a Pulse connection. The accepted identity is bound to that connection. */
+@Serializable
+data class SessionRegisterRequest(
+    val protocolVersion: Int = 1,
+    val appId: String,
+    val deviceId: String,
+    val installationId: String,
+    val platform: String,
+    val deviceType: String,
+    val packageName: String? = null,
+    val appVersion: String? = null,
+    val buildNumber: Long = 0,
+    val sdkVersion: String = "",
+    val capabilities: List<String> = emptyList(),
+)
+
+@Serializable
+data class SessionRegisterResult(
+    val registered: Boolean,
+    val protocolVersion: Int,
+    val connectionId: String,
+    val serverTimeMs: Long,
+    val configRevision: Long = 0,
+    val heartbeatIntervalMs: Long = 60_000,
+)
+
+/** Server-side identity attached to one live connection after SESSION_REGISTER succeeds. */
+data class RegisteredConnection(val request: SessionRegisterRequest) {
+    fun batchIdentityRejection(identity: IngestIdentity): String? = when {
+        identity.projectId != request.appId -> "batch App ID does not match registered connection"
+        identity.deviceId != request.deviceId -> "batch device ID does not match registered connection"
+        identity.installationId != request.installationId -> "batch installation ID does not match registered connection"
+        identity.platform != request.platform -> "batch platform does not match registered connection"
+        identity.packageName != request.packageName -> "batch package does not match registered connection"
+        else -> null
+    }
+
+    fun updateRequestRejection(update: UpdateCheckRequest): String? = when {
+        update.appKey != request.appId -> "update App ID does not match registered connection"
+        update.platform != request.platform -> "update platform does not match registered connection"
+        update.packageName != request.packageName -> "update package does not match registered connection"
+        else -> null
+    }
+}
+
 /**
  * Response envelope for every Pulse msgtrans request. This belongs to the Pulse application
  * protocol; msgtrans itself deliberately transports opaque bytes.
@@ -125,6 +170,16 @@ object IngestCodec {
             PulseWireResponse.serializer(Boolean.serializer()),
             response,
         ).encodeToByteArray()
+
+    fun decodeSessionRegistration(bytes: ByteArray): SessionRegisterRequest =
+        json.decodeFromString(SessionRegisterRequest.serializer(), bytes.decodeToString())
+
+    fun encodeSessionRegistrationResponse(
+        response: PulseWireResponse<SessionRegisterResult>,
+    ): ByteArray = json.encodeToString(
+        PulseWireResponse.serializer(SessionRegisterResult.serializer()),
+        response,
+    ).encodeToByteArray()
 
     fun encodeUpdateResponse(response: PulseWireResponse<logic.UpdateCheckResult>): ByteArray =
         json.encodeToString(
