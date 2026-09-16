@@ -31,6 +31,7 @@ data class PulseArtifactReport(
     /** Runtime evidence is restricted to this managed app and build number. */
     val runtimeBuildNumber: Long? = null,
     val runtimeEvidenceCount: Int = 0,
+    val runtimeEvidenceTruncated: Boolean = false,
 )
 
 /**
@@ -126,16 +127,15 @@ class PulseArtifactLogic(
                 debugSymbolSample = decodeList(row.string("debug_symbol_sample")),
             )
         }
-        val symbols = loadDebugSymbols(summary.long("id"))
         val evidence = loadRuntimeEvidence(
+            analysisId = summary.long("id"),
             appKey = summary.string("app_key"),
             buildNumber = summary.long("build_number"),
             images = images,
-            symbols = symbols,
         )
         val linkedImages = images.map { image ->
             val uuid = image.imageUuid?.normalizedUuid()
-            image.copy(runtimeEvidence = if (uuid == null) emptyList() else evidence[uuid].orEmpty())
+            image.copy(runtimeEvidence = if (uuid == null) emptyList() else evidence.byUuid[uuid].orEmpty())
         }
         return PulseArtifactReport(
             id = summary.long("id"), versionId = versionId, fileName = summary.string("file_name"),
@@ -146,6 +146,7 @@ class PulseArtifactLogic(
             signedImageCount = summary.int("signed_image_count"), createdAt = summary.long("created_at"),
             images = linkedImages, runtimeBuildNumber = summary.long("build_number"),
             runtimeEvidenceCount = linkedImages.sumOf { it.runtimeEvidence.size },
+            runtimeEvidenceTruncated = evidence.truncated,
         )
     }
 
@@ -209,28 +210,27 @@ class PulseArtifactLogic(
         }
     }
 
-    private suspend fun loadDebugSymbols(analysisId: Long): Map<String, List<ArtifactStoredDebugSymbol>> =
-        db.fetchAll(
-            """
-            SELECT image_uuid, address, symbol_name
-            FROM pulse_artifact_debug_symbols
-            WHERE analysis_id = :analysis_id
-            ORDER BY image_uuid, address
-            """.trimIndent(),
-            mapOf("analysis_id" to analysisId),
-        ).map { row ->
-            row.string("image_uuid").normalizedUuid() to ArtifactStoredDebugSymbol(row.long("address"), row.string("symbol_name"))
-        }.groupBy({ it.first }, { it.second })
+    private data class RuntimeEvidenceResult(
+        val byUuid: Map<String, List<ArtifactRuntimeEvidence>> = emptyMap(),
+        val truncated: Boolean = false,
+    )
+
+    private data class RawRuntimeEvidence(
+        val category: String, val name: String, val uuid: String, val moduleName: String?,
+        val callerSymbol: String?, val callsiteOffset: Long?, val stackFingerprint: String?,
+        val callPath: String?, val detail: String?, val occurrences: Long, val devices: Long,
+        val firstSeenAt: Long, val lastSeenAt: Long,
+    )
 
     /** Join runtime facts to shipped code only through an exact, normalized LC_UUID match. */
     private suspend fun loadRuntimeEvidence(
+        analysisId: Long,
         appKey: String,
         buildNumber: Long,
         images: List<IosImageAnalysis>,
-        symbols: Map<String, List<ArtifactStoredDebugSymbol>>,
-    ): Map<String, List<ArtifactRuntimeEvidence>> {
+    ): RuntimeEvidenceResult {
         val uuids = images.mapNotNull { it.imageUuid?.normalizedUuid() }.distinct()
-        if (uuids.isEmpty()) return emptyMap()
+        if (uuids.isEmpty()) return RuntimeEvidenceResult()
         val params = hashMapOf<String, Any?>("app_key" to appKey, "build_number" to buildNumber)
         val uuidSql = uuids.mapIndexed { index, uuid ->
             params["uuid_$index"] = uuid
@@ -285,34 +285,89 @@ class PulseArtifactLogic(
                          attrs->>'callsite_offset', attrs->>'stack_fingerprint', attrs->>'call_path',
                          attrs->>'detail', attrs->>'api_class', attrs->>'api_selector'
             )
-            SELECT * FROM evidence ORDER BY normalized_uuid, occurrences DESC, last_seen_at DESC
+            SELECT *, COUNT(*) OVER()::text AS total_count
+            FROM evidence
+            ORDER BY normalized_uuid, occurrences DESC, last_seen_at DESC
+            LIMIT $MAX_RUNTIME_EVIDENCE_GROUPS
             """.trimIndent(),
             params,
         )
         val imageByName = images.associateBy { it.relativePath.substringAfterLast('/') }
-        return rows.map { row ->
-            val uuid = row.string("normalized_uuid")
-            val offset = row.stringOrNull("callsite_offset")?.toLongOrNull()
-            val path = row.stringOrNull("call_path")
-            uuid to ArtifactRuntimeEvidence(
+        if (rows.isEmpty()) return RuntimeEvidenceResult()
+        val raw = rows.map { row ->
+            RawRuntimeEvidence(
                 category = row.string("category"), name = row.string("name"),
-                moduleName = row.stringOrNull("module_name"), callerSymbol = row.stringOrNull("caller_symbol"),
-                callsiteOffset = offset,
-                resolvedCallerSymbol = offset?.let { ArtifactSymbolResolver.resolve(symbols[uuid], it) },
-                stackFingerprint = row.stringOrNull("stack_fingerprint"), callPath = path,
-                resolvedCallPath = path?.let {
-                    ArtifactSymbolResolver.resolvePath(
-                        it,
-                        imageByName.mapValues { entry -> entry.value.imageUuid?.normalizedUuid() },
-                        symbols,
-                    )
-                },
+                uuid = row.string("normalized_uuid"), moduleName = row.stringOrNull("module_name"),
+                callerSymbol = row.stringOrNull("caller_symbol"),
+                callsiteOffset = row.stringOrNull("callsite_offset")?.toLongOrNull(),
+                stackFingerprint = row.stringOrNull("stack_fingerprint"), callPath = row.stringOrNull("call_path"),
                 detail = row.stringOrNull("detail"), occurrences = row.string("occurrences").toLongOrNull() ?: 0,
                 devices = row.string("devices").toLongOrNull() ?: 0,
                 firstSeenAt = row.string("first_seen_at").toLongOrNull() ?: 0,
                 lastSeenAt = row.string("last_seen_at").toLongOrNull() ?: 0,
             )
+        }
+        val imageUuidsByName = imageByName.mapValues { entry -> entry.value.imageUuid?.normalizedUuid() }
+        val targets = buildSet {
+            raw.forEach { item ->
+                item.callsiteOffset?.let { add(SymbolLookup(item.uuid, it)) }
+                item.callPath?.let { addAll(ArtifactSymbolResolver.targets(it, imageUuidsByName)) }
+            }
+        }
+        val resolved = loadResolvedSymbols(analysisId, targets)
+        val linked = raw.map { item ->
+            item.uuid to ArtifactRuntimeEvidence(
+                category = item.category, name = item.name, moduleName = item.moduleName,
+                callerSymbol = item.callerSymbol, callsiteOffset = item.callsiteOffset,
+                resolvedCallerSymbol = item.callsiteOffset?.let { resolved[SymbolLookup(item.uuid, it)] },
+                stackFingerprint = item.stackFingerprint, callPath = item.callPath,
+                resolvedCallPath = item.callPath?.let { path ->
+                    ArtifactSymbolResolver.resolvePath(path, imageUuidsByName) { uuid, offset ->
+                        resolved[SymbolLookup(uuid, offset)]
+                    }
+                },
+                detail = item.detail, occurrences = item.occurrences, devices = item.devices,
+                firstSeenAt = item.firstSeenAt, lastSeenAt = item.lastSeenAt,
+            )
         }.groupBy({ it.first }, { it.second })
+        val total = rows.first().string("total_count").toIntOrNull() ?: rows.size
+        return RuntimeEvidenceResult(linked, total > rows.size)
+    }
+
+    private suspend fun loadResolvedSymbols(
+        analysisId: Long,
+        targets: Set<SymbolLookup>,
+    ): Map<SymbolLookup, String> {
+        if (targets.isEmpty()) return emptyMap()
+        val params = hashMapOf<String, Any?>("analysis_id" to analysisId)
+        val values = targets.mapIndexed { index, target ->
+            params["target_uuid_$index"] = target.uuid
+            params["target_address_$index"] = target.offset
+            "(CAST(:target_uuid_$index AS text), CAST(:target_address_$index AS bigint))"
+        }.joinToString(",")
+        return db.fetchAll(
+            """
+            WITH targets(image_uuid, target_address) AS (VALUES $values)
+            SELECT targets.image_uuid, targets.target_address, symbol.address, symbol.symbol_name
+            FROM targets
+            LEFT JOIN LATERAL (
+                SELECT address, symbol_name
+                FROM pulse_artifact_debug_symbols
+                WHERE analysis_id = :analysis_id AND image_uuid = targets.image_uuid
+                  AND address <= targets.target_address
+                ORDER BY address DESC
+                LIMIT 1
+            ) symbol ON TRUE
+            """.trimIndent(),
+            params,
+        ).mapNotNull { row ->
+            val symbolAddress = row.longOrNull("address") ?: return@mapNotNull null
+            val targetAddress = row.long("target_address")
+            val name = row.stringOrNull("symbol_name") ?: return@mapNotNull null
+            val delta = targetAddress - symbolAddress
+            SymbolLookup(row.string("image_uuid"), targetAddress) to
+                if (delta == 0L) name else "$name+0x${delta.toString(16)}"
+        }.toMap()
     }
 
     private fun String.normalizedUuid(): String = replace("-", "").lowercase()
@@ -327,10 +382,12 @@ class PulseArtifactLogic(
 
     private companion object {
         val json = Json { ignoreUnknownKeys = true }
+        const val MAX_RUNTIME_EVIDENCE_GROUPS = 1_000
     }
 }
 
 internal data class ArtifactStoredDebugSymbol(val address: Long, val name: String)
+internal data class SymbolLookup(val uuid: String, val offset: Long)
 
 internal object ArtifactSymbolResolver {
     private val callPathFrame = Regex("""([^!>]+)!([^+]+)\+0x([0-9a-fA-F]+)""")
@@ -354,13 +411,27 @@ internal object ArtifactSymbolResolver {
         path: String,
         imageUuidsByName: Map<String, String?>,
         symbols: Map<String, List<ArtifactStoredDebugSymbol>>,
+    ): String = resolvePath(path, imageUuidsByName) { uuid, offset -> resolve(symbols[uuid], offset) }
+
+    fun targets(path: String, imageUuidsByName: Map<String, String?>): Set<SymbolLookup> =
+        callPathFrame.findAll(path).mapNotNull { match ->
+            val imageName = match.groupValues[1].trim()
+            val offset = match.groupValues[3].toLongOrNull(16) ?: return@mapNotNull null
+            val uuid = imageUuidsByName[imageName] ?: return@mapNotNull null
+            SymbolLookup(uuid, offset)
+        }.toSet()
+
+    fun resolvePath(
+        path: String,
+        imageUuidsByName: Map<String, String?>,
+        resolve: (String, Long) -> String?,
     ): String = callPathFrame.replace(path) { match ->
         val rawImageName = match.groupValues[1]
         val imageName = rawImageName.trim()
         val leadingWhitespace = rawImageName.takeWhile { it.isWhitespace() }
         val offset = match.groupValues[3].toLongOrNull(16) ?: return@replace match.value
         val uuid = imageUuidsByName[imageName] ?: return@replace match.value
-        val resolved = resolve(symbols[uuid], offset) ?: return@replace match.value
+        val resolved = resolve(uuid, offset) ?: return@replace match.value
         "$leadingWhitespace$imageName!$resolved"
     }
 }
