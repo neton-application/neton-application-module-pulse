@@ -27,6 +27,10 @@ class IosArtifactAnalyzerTest {
         assertEquals(listOf("/usr/lib/libSystem.B.dylib"), image.linkedLibraries)
         assertEquals("unsigned", image.signatureStatus)
         assertFalse(image.symbolsTruncated)
+
+        val definitions = MachOAnalyzer.analyzeDetailed("Archive.dSYM/Contents/Resources/DWARF/Test", fixture.bytes).single()
+        assertEquals(3, definitions.definedSymbolCount)
+        assertEquals(listOf(0x4010L, 0x4020L, 0x4030L), definitions.definedSymbols.map { it.address })
     }
 
     @Test
@@ -48,6 +52,46 @@ class IosArtifactAnalyzerTest {
         fat.u32be(20, thin.size.toUInt())
         thin.copyInto(fat, offset)
         assertEquals("arm64", MachOAnalyzer.analyze("fat.framework/fat", fat).single().architecture)
+    }
+
+    @Test
+    fun dsymIsAttachedOnlyByMatchingUuidAndArchitecture() {
+        val parsed = MachOAnalyzer.analyzeDetailed(
+            "Archive.dSYM/Contents/Resources/DWARF/Test",
+            machOFixture().bytes,
+        ).single()
+        val release = parsed.image.copy(
+            relativePath = "Payload/Test.app/Frameworks/Test.framework/Test",
+            debugSymbolCount = 0,
+        )
+        val matched = IosArtifactAnalyzer.associateDebugSymbols(listOf(release), listOf(parsed))
+        assertEquals(3, matched.images.single().debugSymbolCount)
+        assertEquals(3, matched.symbols.size)
+
+        val wrongArchitecture = parsed.copy(image = parsed.image.copy(architecture = "x86_64"))
+        val rejected = IosArtifactAnalyzer.associateDebugSymbols(listOf(release), listOf(wrongArchitecture))
+        assertEquals(0, rejected.images.single().debugSymbolCount)
+        assertTrue(rejected.symbols.isEmpty())
+    }
+
+    @Test
+    fun runtimeOffsetsResolveToNearestDsymFunctionWithoutGuessingOtherImages() {
+        val symbols = listOf(
+            ArtifactStoredDebugSymbol(0x4000, "_first"),
+            ArtifactStoredDebugSymbol(0x4100, "_second"),
+        )
+        assertEquals("_second+0x23", ArtifactSymbolResolver.resolve(symbols, 0x4123))
+        assertEquals(null, ArtifactSymbolResolver.resolve(symbols, 0x3000))
+
+        val path = "Ads.framework!<stripped>+0x4123 > Other.framework!<stripped>+0x99"
+        assertEquals(
+            "Ads.framework!_second+0x23 > Other.framework!<stripped>+0x99",
+            ArtifactSymbolResolver.resolvePath(
+                path,
+                mapOf("Ads.framework" to "aabb", "Other.framework" to null),
+                mapOf("aabb" to symbols),
+            ),
+        )
     }
 
     @Test
@@ -146,6 +190,7 @@ class IosArtifactAnalyzerTest {
             out.u32(entry, indexes[i].toUInt())
             out[entry + 4] = if (i == 3) 0x01 else 0x0f
             out[entry + 5] = if (i == 3) 0 else 1
+            out.u64(entry + 8, if (i == 3) 0UL else (0x4010UL + i.toULong() * 0x10UL))
         }
         stringTable.forEachIndexed { i, byte -> out[strOffset + i] = byte }
         signature?.copyInto(out, signatureOffset)

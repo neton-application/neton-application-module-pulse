@@ -11,6 +11,7 @@ import kotlinx.cinterop.ptr
 import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import neton.core.http.BadRequestException
 import neton.security.digest.Sha256
 import platform.posix.EINTR
@@ -67,6 +68,38 @@ data class IosImageAnalysis(
     val linkedLibraries: List<String>,
     val signatureStatus: String,
     val signingCertificates: List<SigningCertificateEvidence>,
+    /** Functions recovered from the dSYM whose LC_UUID and architecture match this image. */
+    val debugSymbolCount: Int = 0,
+    val debugSymbolsTruncated: Boolean = false,
+    val debugSymbolSample: List<String> = emptyList(),
+    /** Runtime facts joined by the server; never persisted as part of static analysis. */
+    val runtimeEvidence: List<ArtifactRuntimeEvidence> = emptyList(),
+)
+
+@Serializable
+data class ArtifactRuntimeEvidence(
+    val category: String,
+    val name: String,
+    val moduleName: String? = null,
+    val callerSymbol: String? = null,
+    val callsiteOffset: Long? = null,
+    val resolvedCallerSymbol: String? = null,
+    val stackFingerprint: String? = null,
+    val callPath: String? = null,
+    val resolvedCallPath: String? = null,
+    val detail: String? = null,
+    val occurrences: Long = 0,
+    val devices: Long = 0,
+    val firstSeenAt: Long = 0,
+    val lastSeenAt: Long = 0,
+)
+
+data class ArtifactDebugSymbol(
+    val imageUuid: String,
+    val architecture: String,
+    val address: Long,
+    val name: String,
+    val language: String,
 )
 
 @Serializable
@@ -74,6 +107,7 @@ data class IosArtifactAnalysis(
     val format: String,
     val archiveSha256: String,
     val images: List<IosImageAnalysis>,
+    @Transient val debugSymbols: List<ArtifactDebugSymbol> = emptyList(),
 ) {
     val swiftSymbolCount: Int get() = images.sumOf { it.swiftSymbolCount }
     val cppSymbolCount: Int get() = images.sumOf { it.cppSymbolCount }
@@ -88,6 +122,11 @@ data class IosArtifactAnalysis(
  * server binary behaves on Linux and macOS. `unzip` is used only as a container decoder.
  */
 object IosArtifactAnalyzer {
+
+    internal data class DebugAssociation(
+        val images: List<IosImageAnalysis>,
+        val symbols: List<ArtifactDebugSymbol>,
+    )
 
     fun analyze(fileName: String, archive: ByteArray): IosArtifactAnalysis {
         if (archive.isEmpty()) throw BadRequestException("制品文件为空")
@@ -107,7 +146,8 @@ object IosArtifactAnalyzer {
                 throw BadRequestException("无法解压制品，请确认文件是有效 IPA/XCArchive ZIP")
             }
             val files = regularFiles("$root/extracted")
-            val images = ArrayList<IosImageAnalysis>()
+            val releaseImages = ArrayList<IosImageAnalysis>()
+            val debugImages = ArrayList<MachOAnalyzer.AnalyzedImage>()
             var scannedBytes = 0L
             for (path in files) {
                 val magic = readPrefix(path, 4) ?: continue
@@ -116,15 +156,51 @@ object IosArtifactAnalyzer {
                 scannedBytes += bytes.size
                 if (scannedBytes > MAX_EXPANDED_BYTES) throw BadRequestException("解压后制品超过 2 GiB 安全上限")
                 val relative = path.removePrefix("$root/extracted/")
-                images += MachOAnalyzer.analyze(relative, bytes)
-                if (images.size > MAX_IMAGES) throw BadRequestException("Mach-O 镜像数量超过安全上限")
+                val parsed = MachOAnalyzer.analyzeDetailed(relative, bytes)
+                if (isDsymImage(relative)) debugImages += parsed else releaseImages += parsed.map { it.image }
+                if (releaseImages.size + debugImages.size > MAX_IMAGES) {
+                    throw BadRequestException("Mach-O 镜像数量超过安全上限")
+                }
             }
-            if (images.isEmpty()) throw BadRequestException("制品内没有找到 Mach-O 镜像")
+            if (releaseImages.isEmpty()) throw BadRequestException("制品内没有找到发布用 Mach-O 镜像")
+            val associated = associateDebugSymbols(releaseImages, debugImages)
+            val images = associated.images
+            val allDebugSymbols = associated.symbols
             val format = if (files.any { ".xcarchive/" in it }) "xcarchive" else "ipa"
-            return IosArtifactAnalysis(format, Sha256.hex(archive), images)
+            return IosArtifactAnalysis(format, Sha256.hex(archive), images, allDebugSymbols)
         } finally {
             removeTree(root)
         }
+    }
+
+    internal fun associateDebugSymbols(
+        releaseImages: List<IosImageAnalysis>,
+        debugImages: List<MachOAnalyzer.AnalyzedImage>,
+    ): DebugAssociation {
+        val debugByIdentity = debugImages
+            .mapNotNull { debug ->
+                debug.image.imageUuid?.let { imageIdentity(it, debug.image.architecture) to debug }
+            }
+            .toMap()
+            val allDebugSymbols = ArrayList<ArtifactDebugSymbol>()
+            var remaining = MAX_DEBUG_SYMBOLS_PER_ARTIFACT
+            val images = releaseImages.map { image ->
+                val debug = image.imageUuid?.let { debugByIdentity[imageIdentity(it, image.architecture)] }
+                if (debug == null) image else {
+                    val accepted = debug.definedSymbols.take(remaining)
+                    remaining -= accepted.size
+                    val uuid = image.imageUuid!!
+                    allDebugSymbols += accepted.map { symbol ->
+                        ArtifactDebugSymbol(uuid, image.architecture, symbol.address, symbol.name, symbol.language)
+                    }
+                    image.copy(
+                        debugSymbolCount = debug.definedSymbolCount,
+                        debugSymbolsTruncated = debug.definedSymbolsTruncated || accepted.size < debug.definedSymbols.size,
+                        debugSymbolSample = debug.definedSymbols.take(MAX_DEBUG_SYMBOL_SAMPLE).map { it.name },
+                    )
+                }
+            }
+        return DebugAssociation(images, allDebugSymbols)
     }
 
     /** Validate the central directory before invoking unzip, including symlink-pivot attacks. */
@@ -299,11 +375,27 @@ object IosArtifactAnalyzer {
     private const val MAX_EXPANDED_BYTES = 2L * 1024 * 1024 * 1024
     private const val MAX_ZIP_ENTRIES = 100_000
     private const val MAX_IMAGES = 1_024
+    private const val MAX_DEBUG_SYMBOLS_PER_ARTIFACT = 250_000
+    private const val MAX_DEBUG_SYMBOL_SAMPLE = 100
     private const val ZIP_EOCD = 0x06054b50U
     private const val ZIP_CENTRAL_FILE = 0x02014b50U
+
+    private fun isDsymImage(path: String): Boolean =
+        ".dSYM/Contents/Resources/DWARF/" in path
+
+    private fun imageIdentity(uuid: String, architecture: String): String =
+        uuid.replace("-", "").lowercase() + ":" + architecture
 }
 
 internal object MachOAnalyzer {
+    data class DefinedSymbol(val address: Long, val name: String, val language: String)
+    data class AnalyzedImage(
+        val image: IosImageAnalysis,
+        val definedSymbols: List<DefinedSymbol>,
+        val definedSymbolCount: Int,
+        val definedSymbolsTruncated: Boolean,
+    )
+
     fun hasMachOMagic(bytes: ByteArray): Boolean {
         if (bytes.size < 4) return false
         val be = u32be(bytes, 0)
@@ -313,6 +405,10 @@ internal object MachOAnalyzer {
     }
 
     fun analyze(path: String, bytes: ByteArray): List<IosImageAnalysis> {
+        return analyzeDetailed(path, bytes).map { it.image }
+    }
+
+    fun analyzeDetailed(path: String, bytes: ByteArray): List<AnalyzedImage> {
         if (bytes.size < 4) return emptyList()
         return when (u32be(bytes, 0)) {
             FAT_MAGIC, FAT_MAGIC_64 -> analyzeFat(path, bytes, u32be(bytes, 0) == FAT_MAGIC_64)
@@ -320,12 +416,12 @@ internal object MachOAnalyzer {
         }
     }
 
-    private fun analyzeFat(path: String, bytes: ByteArray, is64: Boolean): List<IosImageAnalysis> {
+    private fun analyzeFat(path: String, bytes: ByteArray, is64: Boolean): List<AnalyzedImage> {
         if (bytes.size < 8) return emptyList()
         val count = u32be(bytes, 4).toInt()
         if (count !in 1..32) return emptyList()
         val stride = if (is64) 32 else 20
-        val out = ArrayList<IosImageAnalysis>()
+        val out = ArrayList<AnalyzedImage>()
         repeat(count) { i ->
             val p = 8 + i * stride
             if (p + stride > bytes.size) return@repeat
@@ -337,7 +433,7 @@ internal object MachOAnalyzer {
         return out
     }
 
-    private fun analyzeSlice(path: String, file: ByteArray, base: Int, sliceSize: Int): IosImageAnalysis? {
+    private fun analyzeSlice(path: String, file: ByteArray, base: Int, sliceSize: Int): AnalyzedImage? {
         if (base < 0 || sliceSize < 28 || base.toLong() + sliceSize > file.size) return null
         val magic = u32le(file, base)
         val is64 = when (magic) { MH_MAGIC_64 -> true; MH_MAGIC -> false; else -> return null }
@@ -417,7 +513,7 @@ internal object MachOAnalyzer {
             file.copyOfRange(textStart.toInt(), (textStart + textSize).toInt())
         } else ByteArray(0)
         val signature = parseSignature(file, base, sliceSize, codeSigOffset, codeSigSize)
-        return IosImageAnalysis(
+        val image = IosImageAnalysis(
             relativePath = path,
             architecture = architecture(cpu, subtype),
             imageUuid = uuid,
@@ -437,11 +533,13 @@ internal object MachOAnalyzer {
             signatureStatus = signature.first,
             signingCertificates = signature.second,
         )
+        return AnalyzedImage(image, symbols.defined, symbols.definedCount, symbols.definedTruncated)
     }
 
     private data class Symbols(
         val swift: List<String>, val cpp: List<String>, val c: List<String>, val imported: List<String>,
         val swiftCount: Int, val cppCount: Int, val cCount: Int, val importCount: Int, val truncated: Boolean,
+        val defined: List<DefinedSymbol>, val definedCount: Int, val definedTruncated: Boolean,
     )
 
     private fun parseSymbols(
@@ -451,9 +549,11 @@ internal object MachOAnalyzer {
         val stride = if (is64) 16 else 12
         if (nsyms !in 1..MAX_SYMBOLS || symoff < 0 || stroff < 0 || strsize < 0 ||
             symoff.toLong() + nsyms.toLong() * stride > sliceSize || stroff.toLong() + strsize > sliceSize
-        ) return Symbols(emptyList(), emptyList(), emptyList(), emptyList(), 0, 0, 0, 0, false)
+        ) return Symbols(emptyList(), emptyList(), emptyList(), emptyList(), 0, 0, 0, 0, false, emptyList(), 0, false)
         val swift = ArrayList<String>(); val cpp = ArrayList<String>(); val c = ArrayList<String>(); val imports = ArrayList<String>()
+        val defined = ArrayList<DefinedSymbol>()
         var swiftCount = 0; var cppCount = 0; var cCount = 0; var importCount = 0
+        var definedCount = 0
         repeat(nsyms) { i ->
             val p = base + symoff + i * stride
             val strx = u32le(file, p).toInt()
@@ -469,20 +569,28 @@ internal object MachOAnalyzer {
             }
             if (undefined) return@repeat
             val normalized = raw.removePrefix("_")
-            when {
+            val language = when {
                 normalized.startsWith("\$s") || normalized.startsWith("\$S") || normalized.startsWith("_T") -> {
-                    swiftCount++; if (swift.size < MAX_REPORTED_ITEMS) swift += raw
+                    swiftCount++; if (swift.size < MAX_REPORTED_ITEMS) swift += raw; "swift"
                 }
                 normalized.startsWith("_Z") -> {
-                    cppCount++; if (cpp.size < MAX_REPORTED_ITEMS) cpp += raw
+                    cppCount++; if (cpp.size < MAX_REPORTED_ITEMS) cpp += raw; "cpp"
                 }
                 !normalized.startsWith("OBJC_") -> {
-                    cCount++; if (c.size < MAX_REPORTED_ITEMS) c += raw
+                    cCount++; if (c.size < MAX_REPORTED_ITEMS) c += raw; "c"
                 }
+                else -> "objc"
+            }
+            val address = if (is64) u64le(file, p + 8).toLong() else u32le(file, p + 8).toLong()
+            if (address > 0) {
+                definedCount++
+                if (defined.size < MAX_DEBUG_SYMBOLS_PER_IMAGE) defined += DefinedSymbol(address, raw, language)
             }
         }
         return Symbols(swift, cpp, c, imports, swiftCount, cppCount, cCount, importCount,
-            swiftCount > swift.size || cppCount > cpp.size || cCount > c.size || importCount > imports.size)
+            swiftCount > swift.size || cppCount > cpp.size || cCount > c.size || importCount > imports.size,
+            defined.distinctBy { it.address to it.name }.sortedBy { it.address }, definedCount,
+            definedCount > defined.size)
     }
 
     private fun parseSignature(
@@ -553,6 +661,7 @@ internal object MachOAnalyzer {
     private const val MAX_SYMBOLS = 2_000_000
     /** Full counts are retained; samples are bounded so one symbol-rich image cannot dominate DB/API memory. */
     private const val MAX_REPORTED_ITEMS = 500
+    private const val MAX_DEBUG_SYMBOLS_PER_IMAGE = 250_000
     private const val MAX_SYMBOL_LENGTH = 1_024
 }
 

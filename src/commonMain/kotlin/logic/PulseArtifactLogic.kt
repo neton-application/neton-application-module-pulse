@@ -28,6 +28,9 @@ data class PulseArtifactReport(
     val signedImageCount: Int,
     val createdAt: Long,
     val images: List<IosImageAnalysis>,
+    /** Runtime evidence is restricted to this managed app and build number. */
+    val runtimeBuildNumber: Long? = null,
+    val runtimeEvidenceCount: Int = 0,
 )
 
 /**
@@ -81,17 +84,25 @@ class PulseArtifactLogic(
                 ),
             ).single()
             val id = row.long("id")
+            execute("DELETE FROM pulse_artifact_debug_symbols WHERE analysis_id = :analysis_id", mapOf("analysis_id" to id))
             execute("DELETE FROM pulse_artifact_images WHERE analysis_id = :analysis_id", mapOf("analysis_id" to id))
             result.images.forEach { image -> insertImage(id, image, now) }
+            insertDebugSymbols(id, result.debugSymbols)
             id
         }
         log.info("iOS artifact analysed: version=$versionId sha256=${result.archiveSha256} images=${result.images.size}")
-        return result.toReport(reportId, versionId, fileName, bytes.size.toLong(), now)
+        return get(versionId) ?: result.toReport(reportId, versionId, fileName, bytes.size.toLong(), now)
     }
 
     suspend fun get(versionId: Long): PulseArtifactReport? {
         val summary = db.fetchAll(
-            "SELECT * FROM pulse_artifact_analyses WHERE version_id = :version_id",
+            """
+            SELECT a.*, v.build_number, p.app_key
+            FROM pulse_artifact_analyses a
+            JOIN pulse_app_versions v ON v.id = a.version_id
+            JOIN pulse_apps p ON p.id = v.app_id
+            WHERE a.version_id = :version_id
+            """.trimIndent(),
             mapOf("version_id" to versionId),
         ).singleOrNull() ?: return null
         val images = db.fetchAll(
@@ -110,7 +121,21 @@ class PulseArtifactLogic(
                 linkedLibraries = decodeList(row.string("linked_libraries")),
                 signatureStatus = row.string("signature_status"),
                 signingCertificates = json.decodeFromString(row.string("signing_certificates")),
+                debugSymbolCount = row.int("debug_symbol_count"),
+                debugSymbolsTruncated = row.boolean("debug_symbols_truncated"),
+                debugSymbolSample = decodeList(row.string("debug_symbol_sample")),
             )
+        }
+        val symbols = loadDebugSymbols(summary.long("id"))
+        val evidence = loadRuntimeEvidence(
+            appKey = summary.string("app_key"),
+            buildNumber = summary.long("build_number"),
+            images = images,
+            symbols = symbols,
+        )
+        val linkedImages = images.map { image ->
+            val uuid = image.imageUuid?.normalizedUuid()
+            image.copy(runtimeEvidence = if (uuid == null) emptyList() else evidence[uuid].orEmpty())
         }
         return PulseArtifactReport(
             id = summary.long("id"), versionId = versionId, fileName = summary.string("file_name"),
@@ -118,7 +143,9 @@ class PulseArtifactLogic(
             format = summary.string("artifact_format"), imageCount = summary.int("image_count"),
             swiftSymbolCount = summary.int("swift_symbol_count"), cppSymbolCount = summary.int("cpp_symbol_count"),
             cSymbolCount = summary.int("c_symbol_count"), importedSymbolCount = summary.int("imported_symbol_count"),
-            signedImageCount = summary.int("signed_image_count"), createdAt = summary.long("created_at"), images = images,
+            signedImageCount = summary.int("signed_image_count"), createdAt = summary.long("created_at"),
+            images = linkedImages, runtimeBuildNumber = summary.long("build_number"),
+            runtimeEvidenceCount = linkedImages.sumOf { it.runtimeEvidence.size },
         )
     }
 
@@ -129,12 +156,14 @@ class PulseArtifactLogic(
                 analysis_id, relative_path, architecture, image_uuid, text_sha256, text_size,
                 has_swift_metadata, swift_symbol_count, cpp_symbol_count, c_symbol_count,
                 imported_symbol_count, symbols_truncated, swift_symbols, cpp_symbols, c_symbols,
-                imported_symbols, linked_libraries, signature_status, signing_certificates, created_at
+                imported_symbols, linked_libraries, signature_status, signing_certificates,
+                debug_symbol_count, debug_symbols_truncated, debug_symbol_sample, created_at
             ) VALUES (
                 :analysis_id, :path, :architecture, :uuid, :text_sha256, :text_size,
                 :has_swift, :swift_count, :cpp_count, :c_count, :import_count, :truncated,
                 :swift_symbols, :cpp_symbols, :c_symbols, :imported_symbols, :libraries,
-                :signature_status, :certificates, :created_at
+                :signature_status, :certificates, :debug_symbol_count, :debug_symbols_truncated,
+                :debug_symbol_sample, :created_at
             )
             """.trimIndent(),
             mapOf(
@@ -148,10 +177,145 @@ class PulseArtifactLogic(
                 "imported_symbols" to json.encodeToString(image.importedSymbols),
                 "libraries" to json.encodeToString(image.linkedLibraries),
                 "signature_status" to image.signatureStatus,
-                "certificates" to json.encodeToString(image.signingCertificates), "created_at" to now,
+                "certificates" to json.encodeToString(image.signingCertificates),
+                "debug_symbol_count" to image.debugSymbolCount,
+                "debug_symbols_truncated" to image.debugSymbolsTruncated,
+                "debug_symbol_sample" to json.encodeToString(image.debugSymbolSample),
+                "created_at" to now,
             ),
         )
     }
+
+    private suspend fun DbContext.insertDebugSymbols(analysisId: Long, symbols: List<ArtifactDebugSymbol>) {
+        symbols.chunked(250).forEach { chunk ->
+            val params = HashMap<String, Any?>(chunk.size * 6)
+            val values = chunk.mapIndexed { index, symbol ->
+                params["analysis_$index"] = analysisId
+                params["uuid_$index"] = symbol.imageUuid.normalizedUuid()
+                params["architecture_$index"] = symbol.architecture
+                params["address_$index"] = symbol.address
+                params["name_$index"] = symbol.name.take(2_048)
+                params["language_$index"] = symbol.language
+                "(:analysis_$index, :uuid_$index, :architecture_$index, :address_$index, :name_$index, :language_$index)"
+            }.joinToString(",")
+            execute(
+                """
+                INSERT INTO pulse_artifact_debug_symbols
+                    (analysis_id, image_uuid, architecture, address, symbol_name, language)
+                VALUES $values
+                """.trimIndent(),
+                params,
+            )
+        }
+    }
+
+    private suspend fun loadDebugSymbols(analysisId: Long): Map<String, List<ArtifactStoredDebugSymbol>> =
+        db.fetchAll(
+            """
+            SELECT image_uuid, address, symbol_name
+            FROM pulse_artifact_debug_symbols
+            WHERE analysis_id = :analysis_id
+            ORDER BY image_uuid, address
+            """.trimIndent(),
+            mapOf("analysis_id" to analysisId),
+        ).map { row ->
+            row.string("image_uuid").normalizedUuid() to ArtifactStoredDebugSymbol(row.long("address"), row.string("symbol_name"))
+        }.groupBy({ it.first }, { it.second })
+
+    /** Join runtime facts to shipped code only through an exact, normalized LC_UUID match. */
+    private suspend fun loadRuntimeEvidence(
+        appKey: String,
+        buildNumber: Long,
+        images: List<IosImageAnalysis>,
+        symbols: Map<String, List<ArtifactStoredDebugSymbol>>,
+    ): Map<String, List<ArtifactRuntimeEvidence>> {
+        val uuids = images.mapNotNull { it.imageUuid?.normalizedUuid() }.distinct()
+        if (uuids.isEmpty()) return emptyMap()
+        val params = hashMapOf<String, Any?>("app_key" to appKey, "build_number" to buildNumber)
+        val uuidSql = uuids.mapIndexed { index, uuid ->
+            params["uuid_$index"] = uuid
+            ":uuid_$index"
+        }.joinToString(",")
+        val rows = db.fetchAll(
+            """
+            WITH filtered AS (
+                SELECT *, lower(replace(source_image_uuid, '-', '')) AS normalized_uuid,
+                       CASE WHEN LEFT(LTRIM(attributes), 1) = '{' THEN attributes::jsonb ELSE '{}'::jsonb END AS attrs
+                FROM pulse_events
+                WHERE kind = 'Runtime' AND project_id = :app_key AND build_number = :build_number
+                  AND source_image_uuid IS NOT NULL
+                  AND lower(replace(source_image_uuid, '-', '')) IN ($uuidSql)
+            ), evidence AS (
+                SELECT 'module' AS category, name, normalized_uuid,
+                       NULLIF(source_module, '') AS module_name, NULL::text AS caller_symbol,
+                       NULL::text AS callsite_offset, NULL::text AS stack_fingerprint,
+                       NULL::text AS call_path,
+                       COALESCE(NULLIF(attrs->>'relative_path', ''), NULLIF(source_module, '')) AS detail,
+                       COUNT(*)::text AS occurrences, COUNT(DISTINCT device_id)::text AS devices,
+                       MIN(ts)::text AS first_seen_at, MAX(ts)::text AS last_seen_at
+                FROM filtered WHERE name = 'module_artifact'
+                GROUP BY name, normalized_uuid, source_module, attrs->>'relative_path'
+
+                UNION ALL
+                SELECT 'method', name, normalized_uuid, NULLIF(source_module, ''), NULL::text,
+                       NULL::text, NULLIF(attrs->>'methods_digest', ''), NULL::text,
+                       CONCAT_WS(' ', NULLIF(attrs->>'class_name', ''),
+                           'count=' || COALESCE(NULLIF(attrs->>'method_count', ''), '0'),
+                           NULLIF(attrs->>'instance_methods', ''), NULLIF(attrs->>'class_methods', '')),
+                       COUNT(*)::text, COUNT(DISTINCT device_id)::text, MIN(ts)::text, MAX(ts)::text
+                FROM filtered WHERE name = 'objc_class_inventory'
+                GROUP BY name, normalized_uuid, source_module, attrs->>'methods_digest', attrs->>'class_name',
+                         attrs->>'method_count', attrs->>'instance_methods', attrs->>'class_methods'
+
+                UNION ALL
+                SELECT CASE WHEN name = 'network_request' THEN 'network'
+                            WHEN name LIKE '%permission_request' THEN 'permission' ELSE 'api' END,
+                       name, normalized_uuid, NULLIF(source_module, ''),
+                       NULLIF(attrs->>'caller_symbol', ''), NULLIF(attrs->>'callsite_offset', ''),
+                       NULLIF(attrs->>'stack_fingerprint', ''), NULLIF(attrs->>'call_path', ''),
+                       CASE WHEN name = 'network_request' THEN NULLIF(attrs->>'detail', '')
+                            ELSE CONCAT_WS('.', NULLIF(attrs->>'api_class', ''), NULLIF(attrs->>'api_selector', '')) END,
+                       SUM(CASE WHEN attrs->>'call_count' ~ '^[0-9]+$'
+                                THEN (attrs->>'call_count')::bigint ELSE 1 END)::text,
+                       COUNT(DISTINCT device_id)::text, MIN(ts)::text, MAX(ts)::text
+                FROM filtered
+                WHERE name = 'network_request' OR NULLIF(attrs->>'api_class', '') IS NOT NULL
+                   OR name LIKE '%permission_request'
+                GROUP BY name, normalized_uuid, source_module, attrs->>'caller_symbol',
+                         attrs->>'callsite_offset', attrs->>'stack_fingerprint', attrs->>'call_path',
+                         attrs->>'detail', attrs->>'api_class', attrs->>'api_selector'
+            )
+            SELECT * FROM evidence ORDER BY normalized_uuid, occurrences DESC, last_seen_at DESC
+            """.trimIndent(),
+            params,
+        )
+        val imageByName = images.associateBy { it.relativePath.substringAfterLast('/') }
+        return rows.map { row ->
+            val uuid = row.string("normalized_uuid")
+            val offset = row.stringOrNull("callsite_offset")?.toLongOrNull()
+            val path = row.stringOrNull("call_path")
+            uuid to ArtifactRuntimeEvidence(
+                category = row.string("category"), name = row.string("name"),
+                moduleName = row.stringOrNull("module_name"), callerSymbol = row.stringOrNull("caller_symbol"),
+                callsiteOffset = offset,
+                resolvedCallerSymbol = offset?.let { ArtifactSymbolResolver.resolve(symbols[uuid], it) },
+                stackFingerprint = row.stringOrNull("stack_fingerprint"), callPath = path,
+                resolvedCallPath = path?.let {
+                    ArtifactSymbolResolver.resolvePath(
+                        it,
+                        imageByName.mapValues { entry -> entry.value.imageUuid?.normalizedUuid() },
+                        symbols,
+                    )
+                },
+                detail = row.stringOrNull("detail"), occurrences = row.string("occurrences").toLongOrNull() ?: 0,
+                devices = row.string("devices").toLongOrNull() ?: 0,
+                firstSeenAt = row.string("first_seen_at").toLongOrNull() ?: 0,
+                lastSeenAt = row.string("last_seen_at").toLongOrNull() ?: 0,
+            )
+        }.groupBy({ it.first }, { it.second })
+    }
+
+    private fun String.normalizedUuid(): String = replace("-", "").lowercase()
 
     private fun decodeList(value: String): List<String> = json.decodeFromString(value)
 
@@ -163,5 +327,40 @@ class PulseArtifactLogic(
 
     private companion object {
         val json = Json { ignoreUnknownKeys = true }
+    }
+}
+
+internal data class ArtifactStoredDebugSymbol(val address: Long, val name: String)
+
+internal object ArtifactSymbolResolver {
+    private val callPathFrame = Regex("""([^!>]+)!([^+]+)\+0x([0-9a-fA-F]+)""")
+
+    fun resolve(symbols: List<ArtifactStoredDebugSymbol>?, offset: Long): String? {
+        if (symbols.isNullOrEmpty()) return null
+        var low = 0
+        var high = symbols.lastIndex
+        var candidate = -1
+        while (low <= high) {
+            val mid = (low + high) ushr 1
+            if (symbols[mid].address <= offset) { candidate = mid; low = mid + 1 } else high = mid - 1
+        }
+        if (candidate < 0) return null
+        val symbol = symbols[candidate]
+        val delta = offset - symbol.address
+        return if (delta == 0L) symbol.name else "${symbol.name}+0x${delta.toString(16)}"
+    }
+
+    fun resolvePath(
+        path: String,
+        imageUuidsByName: Map<String, String?>,
+        symbols: Map<String, List<ArtifactStoredDebugSymbol>>,
+    ): String = callPathFrame.replace(path) { match ->
+        val rawImageName = match.groupValues[1]
+        val imageName = rawImageName.trim()
+        val leadingWhitespace = rawImageName.takeWhile { it.isWhitespace() }
+        val offset = match.groupValues[3].toLongOrNull(16) ?: return@replace match.value
+        val uuid = imageUuidsByName[imageName] ?: return@replace match.value
+        val resolved = resolve(symbols[uuid], offset) ?: return@replace match.value
+        "$leadingWhitespace$imageName!$resolved"
     }
 }
