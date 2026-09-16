@@ -28,6 +28,7 @@ kotlin {
                 implementation("com.netonstream:neton-database")
                 implementation("com.netonstream:neton-redis")
                 implementation("com.netonstream:neton-logging")
+                implementation("com.netonstream:neton-security")
                 // Outbound HTTP for alert webhooks; the engine is chosen by the application.
                 implementation("com.netonstream:neton-http")
                 // Scheduled alert evaluation (@Job).
