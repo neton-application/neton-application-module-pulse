@@ -40,6 +40,7 @@ data class PulseAuditEvidence(
     val projectId: String? = null,
     val days: Int,
     val modules: List<PulseAuditEvidenceItem>,
+    val internalMethods: List<PulseAuditEvidenceItem>,
     val networkDestinations: List<PulseAuditEvidenceItem>,
     val sensitiveApis: List<PulseAuditEvidenceItem>,
     val permissions: List<PulseAuditEvidenceItem>,
@@ -110,6 +111,22 @@ class PulseAuditLogic(
 
                 UNION ALL
 
+                SELECT 'method', COALESCE(NULLIF(attrs->>'class_name', ''), 'unknown class'),
+                       NULLIF(source_module, ''), NULLIF(source_image_uuid, ''), NULL::text,
+                       NULLIF(attrs->>'methods_digest', ''),
+                       CONCAT_WS(' ',
+                           'count=' || COALESCE(NULLIF(attrs->>'method_count', ''), '0'),
+                           CASE WHEN attrs->>'truncated' = 'true' THEN 'truncated=true' ELSE NULL END,
+                           NULLIF(attrs->>'instance_methods', ''), NULLIF(attrs->>'class_methods', '')
+                       ),
+                       COUNT(*)::text, COUNT(DISTINCT device_id)::text, MIN(ts)::text, MAX(ts)::text
+                FROM filtered WHERE name = 'objc_class_inventory'
+                GROUP BY source_module, source_image_uuid, attrs->>'class_name',
+                         attrs->>'methods_digest', attrs->>'method_count', attrs->>'truncated',
+                         attrs->>'instance_methods', attrs->>'class_methods'
+
+                UNION ALL
+
                 SELECT 'network', COALESCE(NULLIF(attrs->>'detail', ''), 'unknown endpoint'),
                        NULLIF(source_module, ''), NULLIF(source_image_uuid, ''),
                        NULLIF(attrs->>'caller_symbol', ''), NULLIF(attrs->>'stack_fingerprint', ''),
@@ -170,6 +187,7 @@ class PulseAuditLogic(
             projectId = projectId?.takeIf { it.isNotBlank() },
             days = daysSafe,
             modules = rows.filter { it.category == "module" },
+            internalMethods = rows.filter { it.category == "method" },
             networkDestinations = rows.filter { it.category == "network" },
             sensitiveApis = rows.filter { it.category == "api" },
             permissions = rows.filter { it.category == "permission" },
