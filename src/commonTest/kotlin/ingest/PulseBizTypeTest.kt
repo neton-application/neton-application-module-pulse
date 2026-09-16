@@ -9,13 +9,13 @@ class PulseBizTypeTest {
         assertEquals(
             (1..7).toList(),
             listOf(
-                PulseBizType.EVENT_BATCH_UPLOAD,
-                PulseBizType.APP_UPDATE_CHECK,
-                PulseBizType.SESSION_REGISTER,
-                PulseBizType.CRASH_BATCH_UPLOAD,
-                PulseBizType.CONFIG_PULL,
-                PulseBizType.HEARTBEAT,
-                PulseBizType.CONTROL_RPC,
+                PulseBizType.CLIENT_CONNECT,
+                PulseBizType.CLIENT_HEARTBEAT,
+                PulseBizType.CLIENT_CONFIG_PULL,
+                PulseBizType.CLIENT_CRASH_BATCH_UPLOAD,
+                PulseBizType.CLIENT_EVENT_BATCH_UPLOAD,
+                PulseBizType.CLIENT_APP_UPDATE_CHECK,
+                PulseBizType.BIDIRECTIONAL_CONTROL_RPC,
             ),
         )
         assertEquals(0, PulseBizType.RESERVED)

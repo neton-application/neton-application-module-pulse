@@ -52,8 +52,8 @@ data class IngestIdentity(
 
 /** First request on a Pulse connection. The accepted identity is bound to that connection. */
 @Serializable
-data class SessionRegisterRequest(
-    val protocolVersion: Int = 1,
+data class ClientConnectRequest(
+    val protocolVersion: Int = 2,
     val appId: String,
     val deviceId: String,
     val installationId: String,
@@ -67,8 +67,8 @@ data class SessionRegisterRequest(
 )
 
 @Serializable
-data class SessionRegisterResult(
-    val registered: Boolean,
+data class ClientConnectResult(
+    val connected: Boolean,
     val protocolVersion: Int,
     val connectionId: String,
     val serverTimeMs: Long,
@@ -76,21 +76,21 @@ data class SessionRegisterResult(
     val heartbeatIntervalMs: Long = 60_000,
 )
 
-/** Server-side identity attached to one live connection after SESSION_REGISTER succeeds. */
-data class RegisteredConnection(val request: SessionRegisterRequest) {
+/** Server-side identity attached to one live connection after CLIENT_CONNECT succeeds. */
+data class ConnectedClient(val request: ClientConnectRequest) {
     fun batchIdentityRejection(identity: IngestIdentity): String? = when {
-        identity.projectId != request.appId -> "batch App ID does not match registered connection"
-        identity.deviceId != request.deviceId -> "batch device ID does not match registered connection"
-        identity.installationId != request.installationId -> "batch installation ID does not match registered connection"
-        identity.platform != request.platform -> "batch platform does not match registered connection"
-        identity.packageName != request.packageName -> "batch package does not match registered connection"
+        identity.projectId != request.appId -> "batch App ID does not match connected client"
+        identity.deviceId != request.deviceId -> "batch device ID does not match connected client"
+        identity.installationId != request.installationId -> "batch installation ID does not match connected client"
+        identity.platform != request.platform -> "batch platform does not match connected client"
+        identity.packageName != request.packageName -> "batch package does not match connected client"
         else -> null
     }
 
     fun updateRequestRejection(update: UpdateCheckRequest): String? = when {
-        update.appKey != request.appId -> "update App ID does not match registered connection"
-        update.platform != request.platform -> "update platform does not match registered connection"
-        update.packageName != request.packageName -> "update package does not match registered connection"
+        update.appKey != request.appId -> "update App ID does not match connected client"
+        update.platform != request.platform -> "update platform does not match connected client"
+        update.packageName != request.packageName -> "update package does not match connected client"
         else -> null
     }
 }
@@ -171,13 +171,13 @@ object IngestCodec {
             response,
         ).encodeToByteArray()
 
-    fun decodeSessionRegistration(bytes: ByteArray): SessionRegisterRequest =
-        json.decodeFromString(SessionRegisterRequest.serializer(), bytes.decodeToString())
+    fun decodeClientConnect(bytes: ByteArray): ClientConnectRequest =
+        json.decodeFromString(ClientConnectRequest.serializer(), bytes.decodeToString())
 
-    fun encodeSessionRegistrationResponse(
-        response: PulseWireResponse<SessionRegisterResult>,
+    fun encodeClientConnectResponse(
+        response: PulseWireResponse<ClientConnectResult>,
     ): ByteArray = json.encodeToString(
-        PulseWireResponse.serializer(SessionRegisterResult.serializer()),
+        PulseWireResponse.serializer(ClientConnectResult.serializer()),
         response,
     ).encodeToByteArray()
 
@@ -200,7 +200,7 @@ object IngestCodec {
 
 /**
  * Startup update check, sent over the same msgtrans connection as ingest but under
- * [PulseBizType.APP_UPDATE_CHECK]. The client knows its platform and package name from the build itself and its
+ * [PulseBizType.CLIENT_APP_UPDATE_CHECK]. The client knows its platform and package name from the build itself and its
  * app key from SDK configuration; the server needs whichever of the two it can get.
  */
 @Serializable
@@ -215,19 +215,19 @@ data class UpdateCheckRequest(
 object PulseBizType {
     /** Invalid/default value. */
     const val RESERVED = 0
-    /** Upload one identity envelope containing an ordered event array. */
-    const val EVENT_BATCH_UPLOAD = 1
-    /** A startup update check. */
-    const val APP_UPDATE_CHECK = 2
-    /** Register/authenticate this connection and advertise SDK capabilities. */
-    const val SESSION_REGISTER = 3
-    /** Upload one or more high-priority crash reports. */
-    const val CRASH_BATCH_UPLOAD = 4
+    /** Mandatory first request: identify the client and advertise SDK capabilities. */
+    const val CLIENT_CONNECT = 1
+    /** Keep an admitted client routable and reconcile configuration. */
+    const val CLIENT_HEARTBEAT = 2
     /** Pull sampling, audit and collection configuration. */
-    const val CONFIG_PULL = 5
-    /** Keep a registered mobile connection alive. */
-    const val HEARTBEAT = 6
+    const val CLIENT_CONFIG_PULL = 3
+    /** Upload one or more high-priority crash reports. */
+    const val CLIENT_CRASH_BATCH_UPLOAD = 4
+    /** Upload one identity envelope containing an ordered event array. */
+    const val CLIENT_EVENT_BATCH_UPLOAD = 5
+    /** A startup update check. */
+    const val CLIENT_APP_UPDATE_CHECK = 6
     /** Bidirectional routed control request. */
-    const val CONTROL_RPC = 7
+    const val BIDIRECTIONAL_CONTROL_RPC = 7
 
 }

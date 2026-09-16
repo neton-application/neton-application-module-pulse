@@ -13,6 +13,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import msgtrans.transport.Transport
+import msgtrans.transport.ConnectionConfig
 import neton.core.component.NetonLifecycle
 import neton.logging.Logger
 import logic.PulseAppLogic
@@ -61,7 +62,7 @@ class PulseIngestServer(
      * reactor coroutine back on its own thread.
      */
     private val updateQueries = Channel<UpdateQuery>(capacity = 256)
-    private val registrations = Channel<RegistrationQuery>(capacity = 256)
+    private val clientConnectRequests = Channel<ClientConnectQuery>(capacity = 256)
     private var worker: Worker? = null
 
     override suspend fun start() {
@@ -75,7 +76,7 @@ class PulseIngestServer(
                     pending.reply.complete(PulseWireResponse(400, "invalid event batch", false))
                     continue
                 }
-                pending.registered.batchIdentityRejection(decoded.identity)?.let { rejection ->
+                pending.connectedClient.batchIdentityRejection(decoded.identity)?.let { rejection ->
                     log.warn("pulse ingest rejected connection identity mismatch: $rejection")
                     pending.reply.complete(PulseWireResponse(403, rejection, false))
                     continue
@@ -103,41 +104,41 @@ class PulseIngestServer(
                 pending.reply.complete(response)
             }
         }
-        // Registration is the first request on a connection. Database-backed App/package policy
+        // CLIENT_CONNECT is the first request on a connection. Database-backed App/package policy
         // stays on the main scope; the reactor receives only the immutable accepted identity.
         scope.launch {
-            for (query in registrations) {
+            for (query in clientConnectRequests) {
                 val decision = try {
-                    val request = IngestCodec.decodeSessionRegistration(query.payload)
-                    val invalid = registrationRejection(request)
+                    val request = IngestCodec.decodeClientConnect(query.payload)
+                    val invalid = clientConnectRejection(request)
                         ?: apps.ingestRejection(request.appId, request.platform, request.packageName)
                     if (invalid != null) {
-                        RegistrationDecision(
-                            IngestCodec.encodeSessionRegistrationResponse(
+                        ClientConnectDecision(
+                            IngestCodec.encodeClientConnectResponse(
                                 PulseWireResponse(code = 403, msg = invalid),
                             ),
                         )
                     } else {
-                        val registered = RegisteredConnection(request)
-                        RegistrationDecision(
-                            IngestCodec.encodeSessionRegistrationResponse(
+                        val connectedClient = ConnectedClient(request)
+                        ClientConnectDecision(
+                            IngestCodec.encodeClientConnectResponse(
                                 PulseWireResponse(
                                     code = 0,
-                                    data = SessionRegisterResult(
-                                        registered = true,
+                                    data = ClientConnectResult(
+                                        connected = true,
                                         protocolVersion = request.protocolVersion,
                                         connectionId = newConnectionId(),
                                         serverTimeMs = nowMs(),
                                     ),
                                 ),
                             ),
-                            registered,
+                            connectedClient,
                         )
                     }
                 } catch (t: Throwable) {
-                    RegistrationDecision(
-                        IngestCodec.encodeSessionRegistrationResponse(
-                            PulseWireResponse(code = 400, msg = "invalid session registration"),
+                    ClientConnectDecision(
+                        IngestCodec.encodeClientConnectResponse(
+                            PulseWireResponse(code = 400, msg = "invalid CLIENT_CONNECT payload"),
                         ),
                     )
                 }
@@ -149,7 +150,7 @@ class PulseIngestServer(
             for (query in updateQueries) {
                 val answer = try {
                     val req = IngestCodec.json.decodeFromString(UpdateCheckRequest.serializer(), query.payload.decodeToString())
-                    val rejection = query.registered.updateRequestRejection(req)
+                    val rejection = query.connectedClient.updateRequestRejection(req)
                     if (rejection != null) PulseWireResponse(code = 403, msg = rejection)
                     else {
                         val result = apps.checkUpdate(req.platform, req.appKey, req.packageName, req.buildNumber)
@@ -167,31 +168,36 @@ class PulseIngestServer(
         // Reactor worker: msgtrans server. onRequest hands the payload to the channel and acks.
         val w = Worker.start(name = "pulse-msgtrans")
         worker = w
-        val ch = batches; val uq = updateQueries; val rq = registrations; val h = host; val p = port
-        w.execute(TransferMode.SAFE, { Bind(ch, uq, rq, h, p) }) { (channel, queries, registrationQueries, bindHost, bindPort) ->
+        val ch = batches; val uq = updateQueries; val rq = clientConnectRequests; val h = host; val p = port
+        w.execute(TransferMode.SAFE, { Bind(ch, uq, rq, h, p) }) { (channel, queries, connectRequests, bindHost, bindPort) ->
             neton.io.net.runReactor {
-                val server = Transport.bind(this, bindHost, bindPort) { conn ->
-                    var registered: RegisteredConnection? = null
+                val server = Transport.bind(
+                    this,
+                    bindHost,
+                    bindPort,
+                    ConnectionConfig(requiredFirstRequestBizType = PulseBizType.CLIENT_CONNECT),
+                ) { conn ->
+                    var connectedClient: ConnectedClient? = null
                     conn.onRequest { payload, bizType ->
                         when (bizType) {
-                            PulseBizType.SESSION_REGISTER -> {
-                                if (registered != null) return@onRequest IngestCodec.encodeSessionRegistrationResponse(
-                                    PulseWireResponse(code = 409, msg = "connection is already registered"),
+                            PulseBizType.CLIENT_CONNECT -> {
+                                if (connectedClient != null) return@onRequest IngestCodec.encodeClientConnectResponse(
+                                    PulseWireResponse(code = 409, msg = "CLIENT_CONNECT already completed"),
                                 )
-                                val reply = CompletableDeferred<RegistrationDecision>()
-                                if (registrationQueries.trySend(RegistrationQuery(payload, reply)).isFailure) {
-                                    IngestCodec.encodeSessionRegistrationResponse(
-                                        PulseWireResponse(code = 429, msg = "registration service overloaded"),
+                                val reply = CompletableDeferred<ClientConnectDecision>()
+                                if (connectRequests.trySend(ClientConnectQuery(payload, reply)).isFailure) {
+                                    IngestCodec.encodeClientConnectResponse(
+                                        PulseWireResponse(code = 429, msg = "CLIENT_CONNECT service overloaded"),
                                     )
                                 } else {
                                     val decision = reply.await()
-                                    decision.registered?.let { registered = it }
+                                    decision.connectedClient?.let { connectedClient = it }
                                     decision.payload
                                 }
                             }
-                            PulseBizType.APP_UPDATE_CHECK -> {
-                                val auth = registered ?: return@onRequest IngestCodec.encodeEmptyResponse(
-                                    PulseWireResponse(code = 401, msg = "SESSION_REGISTER is required before this request"),
+                            PulseBizType.CLIENT_APP_UPDATE_CHECK -> {
+                                val auth = connectedClient ?: return@onRequest IngestCodec.encodeEmptyResponse(
+                                    PulseWireResponse(code = 401, msg = "CLIENT_CONNECT is required before this request"),
                                 )
                                 val reply = CompletableDeferred<ByteArray>()
                                 if (queries.trySend(UpdateQuery(payload, auth, reply)).isSuccess) reply.await()
@@ -199,9 +205,9 @@ class PulseIngestServer(
                                     PulseWireResponse(code = 429, msg = "update service overloaded"),
                                 )
                             }
-                            PulseBizType.EVENT_BATCH_UPLOAD -> {
-                                val auth = registered ?: return@onRequest IngestCodec.encodeEmptyResponse(
-                                    PulseWireResponse(code = 401, msg = "SESSION_REGISTER is required before this request"),
+                            PulseBizType.CLIENT_EVENT_BATCH_UPLOAD -> {
+                                val auth = connectedClient ?: return@onRequest IngestCodec.encodeEmptyResponse(
+                                    PulseWireResponse(code = 401, msg = "CLIENT_CONNECT is required before this request"),
                                 )
                                 // Acknowledge only once the batch is on the queue. Throwing here
                                 // fails the client's request, which is exactly what makes it keep
@@ -212,10 +218,10 @@ class PulseIngestServer(
                                     PulseWireResponse(code = 429, msg = "ingest overloaded", data = false)
                                 IngestCodec.encodeUploadResponse(response)
                             }
-                            PulseBizType.CRASH_BATCH_UPLOAD,
-                            PulseBizType.CONFIG_PULL,
-                            PulseBizType.HEARTBEAT,
-                            PulseBizType.CONTROL_RPC,
+                            PulseBizType.CLIENT_CRASH_BATCH_UPLOAD,
+                            PulseBizType.CLIENT_CONFIG_PULL,
+                            PulseBizType.CLIENT_HEARTBEAT,
+                            PulseBizType.BIDIRECTIONAL_CONTROL_RPC,
                             -> IngestCodec.encodeEmptyResponse(
                                 PulseWireResponse(code = 501, msg = "pulse biz_type=$bizType is allocated but not implemented"),
                             )
@@ -235,7 +241,7 @@ class PulseIngestServer(
         scope.cancel()
         batches.close()
         updateQueries.close()
-        registrations.close()
+        clientConnectRequests.close()
         worker?.requestTermination(processScheduledJobs = false)
         worker = null
         log.info("pulse msgtrans ingest stopped")
@@ -244,7 +250,7 @@ class PulseIngestServer(
     private data class Bind(
         val batches: Channel<PendingBatch>,
         val updateQueries: Channel<UpdateQuery>,
-        val registrations: Channel<RegistrationQuery>,
+        val clientConnectRequests: Channel<ClientConnectQuery>,
         val host: String,
         val port: Int,
     )
@@ -252,29 +258,29 @@ class PulseIngestServer(
     /** One update check in flight: the raw request and where to put the answer. */
     private class UpdateQuery(
         val payload: ByteArray,
-        val registered: RegisteredConnection,
+        val connectedClient: ConnectedClient,
         val reply: CompletableDeferred<ByteArray>,
     )
 
     /** One batch in flight: the raw payload and whether it made it onto the queue. */
     private class PendingBatch(
         val payload: ByteArray,
-        val registered: RegisteredConnection,
+        val connectedClient: ConnectedClient,
         val reply: CompletableDeferred<PulseWireResponse<Boolean>>,
     )
 
-    private class RegistrationQuery(
+    private class ClientConnectQuery(
         val payload: ByteArray,
-        val reply: CompletableDeferred<RegistrationDecision>,
+        val reply: CompletableDeferred<ClientConnectDecision>,
     )
 
-    private data class RegistrationDecision(
+    private data class ClientConnectDecision(
         val payload: ByteArray,
-        val registered: RegisteredConnection? = null,
+        val connectedClient: ConnectedClient? = null,
     )
 
-    private fun registrationRejection(request: SessionRegisterRequest): String? = when {
-        request.protocolVersion != 1 -> "unsupported Pulse protocol version ${request.protocolVersion}"
+    private fun clientConnectRejection(request: ClientConnectRequest): String? = when {
+        request.protocolVersion != 2 -> "unsupported Pulse protocol version ${request.protocolVersion}"
         request.appId.isBlank() -> "missing App ID"
         request.deviceId.isBlank() -> "missing device ID"
         request.installationId.isBlank() -> "missing installation ID"

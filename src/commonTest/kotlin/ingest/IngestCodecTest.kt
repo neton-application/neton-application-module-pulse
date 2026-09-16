@@ -101,38 +101,38 @@ class IngestCodecTest {
     }
 
     @Test
-    fun registrationBindsTheConnectionToTheBatchIdentity() {
-        val request = IngestCodec.decodeSessionRegistration(
-            """{"protocolVersion":1,"appId":"p1","deviceId":"d1","installationId":"i1",
+    fun clientConnectBindsIdentityToTheConnection() {
+        val request = IngestCodec.decodeClientConnect(
+            """{"protocolVersion":2,"appId":"p1","deviceId":"d1","installationId":"i1",
                 "platform":"ios","deviceType":"iphone","packageName":"com.example.app",
                 "appVersion":"1.0.0","buildNumber":1,"sdkVersion":"1.0.0",
                 "capabilities":["batch_upload"]}""".encodeToByteArray(),
         )
-        val registered = RegisteredConnection(request)
+        val connectedClient = ConnectedClient(request)
 
         assertNull(
-            registered.batchIdentityRejection(
+            connectedClient.batchIdentityRejection(
                 IngestIdentity("p1", "i1", "d1", platform = "ios", packageName = "com.example.app"),
             ),
         )
         assertEquals(
-            "batch device ID does not match registered connection",
-            registered.batchIdentityRejection(
+            "batch device ID does not match connected client",
+            connectedClient.batchIdentityRejection(
                 IngestIdentity("p1", "i1", "other", platform = "ios", packageName = "com.example.app"),
             ),
         )
     }
 
     @Test
-    fun registrationResponseUsesTheCommonEnvelope() {
-        val encoded = IngestCodec.encodeSessionRegistrationResponse(
+    fun clientConnectResponseUsesTheCommonEnvelope() {
+        val encoded = IngestCodec.encodeClientConnectResponse(
             PulseWireResponse(
                 code = 0,
-                data = SessionRegisterResult(true, 1, "connection-1", 1234),
+                data = ClientConnectResult(true, 2, "connection-1", 1234),
             ),
         ).decodeToString()
         val json = IngestCodec.json.parseToJsonElement(encoded).jsonObject
         assertEquals(0, json.getValue("code").jsonPrimitive.int)
-        assertTrue(json.getValue("data").jsonObject.getValue("registered").jsonPrimitive.boolean)
+        assertTrue(json.getValue("data").jsonObject.getValue("connected").jsonPrimitive.boolean)
     }
 }
