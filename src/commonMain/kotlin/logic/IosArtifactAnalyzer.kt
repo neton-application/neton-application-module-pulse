@@ -208,25 +208,26 @@ object IosArtifactAnalyzer {
     }
 
     private fun readFile(path: String, maxBytes: Int): ByteArray? {
+        val size = memScoped {
+            val st = alloc<stat>()
+            if (lstat(path, st.ptr) != 0) return null
+            st.st_size
+        }
+        if (size < 0L) return null
+        if (size > maxBytes) throw BadRequestException("单个 Mach-O 镜像超过 512 MiB 上限")
         val fd = open(path, O_RDONLY)
         if (fd < 0) return null
         try {
-            val chunks = ArrayList<ByteArray>()
-            var total = 0
-            while (true) {
-                val chunk = ByteArray(64 * 1024)
-                val n = chunk.usePinned { read(fd, it.addressOf(0), chunk.size.convert()) }
+            val result = ByteArray(size.toInt())
+            var offset = 0
+            while (offset < result.size) {
+                val n = result.usePinned { read(fd, it.addressOf(offset), (result.size - offset).convert()) }
                 if (n < 0 && errno == EINTR) continue
                 if (n < 0) return null
-                if (n == 0L) break
-                total += n.toInt()
-                if (total > maxBytes) throw BadRequestException("单个 Mach-O 镜像超过 512 MiB 上限")
-                chunks += if (n.toInt() == chunk.size) chunk else chunk.copyOf(n.toInt())
+                if (n == 0L) return null
+                offset += n.toInt()
             }
-            return ByteArray(total).also { out ->
-                var offset = 0
-                for (chunk in chunks) { chunk.copyInto(out, offset); offset += chunk.size }
-            }
+            return result
         } finally {
             close(fd)
         }
