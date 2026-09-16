@@ -28,6 +28,7 @@ data class PulseAuditEvidenceItem(
     val imageUuid: String? = null,
     val callerSymbol: String? = null,
     val stackFingerprint: String? = null,
+    val callPath: String? = null,
     val detail: String? = null,
     val occurrences: Long = 0,
     val devices: Long = 0,
@@ -95,6 +96,7 @@ class PulseAuditLogic(
                        NULLIF(source_module, '') AS module_name,
                        NULLIF(source_image_uuid, '') AS image_uuid,
                        NULL::text AS caller_symbol, NULL::text AS stack_fingerprint,
+                       NULL::text AS call_path,
                        COALESCE(
                            NULLIF(attrs->>'relative_path', ''),
                            NULLIF(source_module, ''),
@@ -113,7 +115,7 @@ class PulseAuditLogic(
 
                 SELECT 'method', COALESCE(NULLIF(attrs->>'class_name', ''), 'unknown class'),
                        NULLIF(source_module, ''), NULLIF(source_image_uuid, ''), NULL::text,
-                       NULLIF(attrs->>'methods_digest', ''),
+                       NULLIF(attrs->>'methods_digest', ''), NULL::text,
                        CONCAT_WS(' ',
                            'count=' || COALESCE(NULLIF(attrs->>'method_count', ''), '0'),
                            CASE WHEN attrs->>'truncated' = 'true' THEN 'truncated=true' ELSE NULL END,
@@ -130,16 +132,18 @@ class PulseAuditLogic(
                 SELECT 'network', COALESCE(NULLIF(attrs->>'detail', ''), 'unknown endpoint'),
                        NULLIF(source_module, ''), NULLIF(source_image_uuid, ''),
                        NULLIF(attrs->>'caller_symbol', ''), NULLIF(attrs->>'stack_fingerprint', ''),
+                       NULLIF(attrs->>'call_path', ''),
                        NULLIF(attrs->>'detail', ''),
                        COUNT(*)::text, COUNT(DISTINCT device_id)::text, MIN(ts)::text, MAX(ts)::text
                 FROM filtered WHERE name = 'network_request'
                 GROUP BY source_module, source_image_uuid, attrs->>'caller_symbol',
-                         attrs->>'stack_fingerprint', attrs->>'detail'
+                         attrs->>'stack_fingerprint', attrs->>'call_path', attrs->>'detail'
 
                 UNION ALL
 
                 SELECT 'api', name, NULLIF(source_module, ''), NULLIF(source_image_uuid, ''),
                        NULLIF(attrs->>'caller_symbol', ''), NULLIF(attrs->>'stack_fingerprint', ''),
+                       NULLIF(attrs->>'call_path', ''),
                        CONCAT_WS('.', NULLIF(attrs->>'api_class', ''), NULLIF(attrs->>'api_selector', '')),
                        SUM(CASE
                            WHEN attrs->>'call_count' ~ '^[0-9]+$' THEN (attrs->>'call_count')::bigint
@@ -151,18 +155,19 @@ class PulseAuditLogic(
                   AND name <> 'network_request'
                   AND name NOT LIKE '%permission_request'
                 GROUP BY name, source_module, source_image_uuid, attrs->>'api_class', attrs->>'api_selector',
-                         attrs->>'caller_symbol', attrs->>'stack_fingerprint'
+                         attrs->>'caller_symbol', attrs->>'stack_fingerprint', attrs->>'call_path'
 
                 UNION ALL
 
                 SELECT 'permission', name, NULLIF(source_module, ''), NULLIF(source_image_uuid, ''),
-                       NULLIF(attrs->>'caller_symbol', ''), NULLIF(attrs->>'stack_fingerprint', ''), attrs::text,
+                       NULLIF(attrs->>'caller_symbol', ''), NULLIF(attrs->>'stack_fingerprint', ''),
+                       NULLIF(attrs->>'call_path', ''), attrs::text,
                        COUNT(*)::text, COUNT(DISTINCT device_id)::text, MIN(ts)::text, MAX(ts)::text
                 FROM filtered
                 WHERE name LIKE '%permission_request'
                    OR name IN ('privacy_declarations', 'privacy_manifest', 'signing_declarations')
                 GROUP BY name, source_module, source_image_uuid, attrs->>'caller_symbol',
-                         attrs->>'stack_fingerprint', attrs::text
+                         attrs->>'stack_fingerprint', attrs->>'call_path', attrs::text
             )
             SELECT * FROM evidence ORDER BY category, occurrences DESC, last_seen_at DESC
             """.trimIndent(),
@@ -175,6 +180,7 @@ class PulseAuditLogic(
                 imageUuid = it.stringOrNull("image_uuid"),
                 callerSymbol = it.stringOrNull("caller_symbol"),
                 stackFingerprint = it.stringOrNull("stack_fingerprint"),
+                callPath = it.stringOrNull("call_path"),
                 detail = it.stringOrNull("detail"),
                 occurrences = it.string("occurrences").toLongOrNull() ?: 0,
                 devices = it.string("devices").toLongOrNull() ?: 0,
