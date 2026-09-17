@@ -108,15 +108,16 @@ class PulseConnectionLogic(
 
     suspend fun summary(projectId: String? = null): PulseConnectionSummary {
         val online = listOnline(projectId)
-        val params = HashMap<String, Any?>()
-        val projectWhere = if (projectId.isNullOrBlank()) "" else {
-            params["project_id"] = projectId
-            "AND project_id=:project_id"
-        }
+        val projectWhere = if (projectId.isNullOrBlank()) "" else "AND project_id=:project_id"
+        fun queryParams(timeName: String, timeValue: Long): MutableMap<String, Any?> =
+            HashMap<String, Any?>().apply {
+                put(timeName, timeValue)
+                if (!projectId.isNullOrBlank()) put("project_id", projectId)
+            }
         val active = db.fetchAll(
             """SELECT COUNT(DISTINCT device_id) AS count FROM pulse_events
                WHERE ts >= :since $projectWhere AND device_id IS NOT NULL AND device_id <> ''""",
-            params.apply { put("since", nowMs() - 5 * 60_000) },
+            queryParams("since", nowMs() - 5 * 60_000),
         ).first().long("count")
         val sdkRows = db.fetchAll(
             """SELECT sdk_version, COUNT(DISTINCT device_id) AS devices,
@@ -124,7 +125,7 @@ class PulseConnectionLogic(
                FROM pulse_events
                WHERE ts >= :sdk_since $projectWhere AND sdk_version IS NOT NULL AND sdk_version <> ''
                GROUP BY sdk_version ORDER BY devices DESC, sdk_version DESC""",
-            HashMap(params).apply { put("sdk_since", nowMs() - 30L * 24 * 60 * 60_000) },
+            queryParams("sdk_since", nowMs() - 30L * 24 * 60 * 60_000),
         )
         return PulseConnectionSummary(
             online.size,
