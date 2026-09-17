@@ -46,6 +46,21 @@ class PulseConnectionLogic(
 ) {
     suspend fun connected(request: ClientConnectRequest, connectionId: String, nowMs: Long) {
         val online = request.toOnline(connectionId, nowMs)
+        // A process restart cannot always run every socket close callback. Once the same stable
+        // device authenticates a replacement connection, close any unfinished history row so
+        // PostgreSQL never claims that two sessions from that device are still open forever.
+        db.execute(
+            """UPDATE pulse_client_connections
+               SET disconnected_at=:now, disconnect_reason='replaced_by_reconnect'
+               WHERE project_id=:project_id AND device_id=:device_id
+                 AND connection_id<>:connection_id AND disconnected_at IS NULL""",
+            mapOf(
+                "now" to nowMs,
+                "project_id" to online.projectId,
+                "device_id" to online.deviceId,
+                "connection_id" to connectionId,
+            ),
+        )
         db.execute(
             """
             INSERT INTO pulse_client_connections
@@ -103,7 +118,15 @@ class PulseConnectionLogic(
                     ?.let(result::add)
             }
         }
-        return result.sortedByDescending { it.lastHeartbeatAt }
+        // A reconnect creates a new connection ID. The old key may remain until its short TTL
+        // expires when a process dies before the close callback is drained. This screen answers
+        // "how many devices are online", so keep only the newest live connection per stable
+        // device instead of briefly counting both sockets.
+        return result
+            .groupBy { it.projectId to it.deviceId }
+            .values
+            .map { connections -> connections.maxBy { it.lastHeartbeatAt } }
+            .sortedByDescending { it.lastHeartbeatAt }
     }
 
     suspend fun summary(projectId: String? = null): PulseConnectionSummary {
