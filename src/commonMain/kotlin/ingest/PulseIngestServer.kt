@@ -17,6 +17,7 @@ import msgtrans.transport.ConnectionConfig
 import neton.core.component.NetonLifecycle
 import neton.logging.Logger
 import logic.PulseAppLogic
+import logic.PulseConnectionLogic
 import queue.PulseQueue
 import logic.UpdateCheckResult
 import platform.posix.getenv
@@ -38,6 +39,7 @@ import kotlin.native.concurrent.Worker
 class PulseIngestServer(
     private val queue: PulseQueue,
     private val apps: PulseAppLogic,
+    private val connections: PulseConnectionLogic,
     private val log: Logger,
     private val host: String = "0.0.0.0",
     private val port: Int = defaultPort(),
@@ -63,6 +65,8 @@ class PulseIngestServer(
      */
     private val updateQueries = Channel<UpdateQuery>(capacity = 256)
     private val clientConnectRequests = Channel<ClientConnectQuery>(capacity = 256)
+    private val heartbeats = Channel<HeartbeatQuery>(capacity = 1024)
+    private val disconnects = Channel<String>(capacity = 1024)
     private var worker: Worker? = null
 
     override suspend fun start() {
@@ -119,7 +123,9 @@ class PulseIngestServer(
                             ),
                         )
                     } else {
-                        val connectedClient = ConnectedClient(request)
+                        val connectionId = newConnectionId()
+                        connections.connected(request, connectionId, nowMs())
+                        val connectedClient = ConnectedClient(request, connectionId)
                         ClientConnectDecision(
                             IngestCodec.encodeClientConnectResponse(
                                 PulseWireResponse(
@@ -127,7 +133,7 @@ class PulseIngestServer(
                                     data = ClientConnectResult(
                                         connected = true,
                                         protocolVersion = request.protocolVersion,
-                                        connectionId = newConnectionId(),
+                                        connectionId = connectionId,
                                         serverTimeMs = nowMs(),
                                     ),
                                 ),
@@ -143,6 +149,27 @@ class PulseIngestServer(
                     )
                 }
                 query.reply.complete(decision)
+            }
+        }
+        scope.launch {
+            for (query in heartbeats) {
+                val response = try {
+                    val heartbeat = IngestCodec.decodeHeartbeat(query.payload)
+                    val data = connections.heartbeat(query.connectedClient, heartbeat, nowMs())
+                    PulseWireResponse(code = 0, data = data)
+                } catch (t: IllegalArgumentException) {
+                    PulseWireResponse(code = 403, msg = t.message)
+                } catch (t: Throwable) {
+                    log.warn("pulse heartbeat failed: ${t.message}")
+                    PulseWireResponse(code = 503, msg = "heartbeat service unavailable")
+                }
+                query.reply.complete(IngestCodec.encodeHeartbeatResponse(response))
+            }
+        }
+        scope.launch {
+            for (connectionId in disconnects) {
+                runCatching { connections.disconnected(connectionId, nowMs()) }
+                    .onFailure { log.warn("pulse disconnect tracking failed: ${it.message}") }
             }
         }
         // Main-scope coroutine: answer update checks, which need the database.
@@ -168,8 +195,16 @@ class PulseIngestServer(
         // Reactor worker: msgtrans server. onRequest hands the payload to the channel and acks.
         val w = Worker.start(name = "pulse-msgtrans")
         worker = w
-        val ch = batches; val uq = updateQueries; val rq = clientConnectRequests; val h = host; val p = port
-        w.execute(TransferMode.SAFE, { Bind(ch, uq, rq, h, p) }) { (channel, queries, connectRequests, bindHost, bindPort) ->
+        val ch = batches; val uq = updateQueries; val rq = clientConnectRequests
+        val hb = heartbeats; val dc = disconnects; val h = host; val p = port
+        w.execute(TransferMode.SAFE, { Bind(ch, uq, rq, hb, dc, h, p) }) { binding ->
+            val channel = binding.batches
+            val queries = binding.updateQueries
+            val connectRequests = binding.clientConnectRequests
+            val heartbeatRequests = binding.heartbeats
+            val disconnectRequests = binding.disconnects
+            val bindHost = binding.host
+            val bindPort = binding.port
             neton.io.net.runReactor {
                 val server = Transport.bind(
                     this,
@@ -178,6 +213,9 @@ class PulseIngestServer(
                     ConnectionConfig(requiredFirstRequestBizType = PulseBizType.CLIENT_CONNECT),
                 ) { conn ->
                     var connectedClient: ConnectedClient? = null
+                    conn.onClose {
+                        connectedClient?.connectionId?.let { disconnectRequests.trySend(it) }
+                    }
                     conn.onRequest { payload, bizType ->
                         when (bizType) {
                             PulseBizType.CLIENT_CONNECT -> {
@@ -194,6 +232,16 @@ class PulseIngestServer(
                                     decision.connectedClient?.let { connectedClient = it }
                                     decision.payload
                                 }
+                            }
+                            PulseBizType.CLIENT_HEARTBEAT -> {
+                                val auth = connectedClient ?: return@onRequest IngestCodec.encodeEmptyResponse(
+                                    PulseWireResponse(code = 401, msg = "CLIENT_CONNECT is required before this request"),
+                                )
+                                val reply = CompletableDeferred<ByteArray>()
+                                if (heartbeatRequests.trySend(HeartbeatQuery(payload, auth, reply)).isSuccess) reply.await()
+                                else IngestCodec.encodeHeartbeatResponse(
+                                    PulseWireResponse(code = 429, msg = "heartbeat service overloaded"),
+                                )
                             }
                             PulseBizType.CLIENT_APP_UPDATE_CHECK -> {
                                 val auth = connectedClient ?: return@onRequest IngestCodec.encodeEmptyResponse(
@@ -220,7 +268,6 @@ class PulseIngestServer(
                             }
                             PulseBizType.CLIENT_CRASH_BATCH_UPLOAD,
                             PulseBizType.CLIENT_CONFIG_PULL,
-                            PulseBizType.CLIENT_HEARTBEAT,
                             PulseBizType.BIDIRECTIONAL_CONTROL_RPC,
                             -> IngestCodec.encodeEmptyResponse(
                                 PulseWireResponse(code = 501, msg = "pulse biz_type=$bizType is allocated but not implemented"),
@@ -242,6 +289,8 @@ class PulseIngestServer(
         batches.close()
         updateQueries.close()
         clientConnectRequests.close()
+        heartbeats.close()
+        disconnects.close()
         worker?.requestTermination(processScheduledJobs = false)
         worker = null
         log.info("pulse msgtrans ingest stopped")
@@ -251,6 +300,8 @@ class PulseIngestServer(
         val batches: Channel<PendingBatch>,
         val updateQueries: Channel<UpdateQuery>,
         val clientConnectRequests: Channel<ClientConnectQuery>,
+        val heartbeats: Channel<HeartbeatQuery>,
+        val disconnects: Channel<String>,
         val host: String,
         val port: Int,
     )
@@ -272,6 +323,12 @@ class PulseIngestServer(
     private class ClientConnectQuery(
         val payload: ByteArray,
         val reply: CompletableDeferred<ClientConnectDecision>,
+    )
+
+    private class HeartbeatQuery(
+        val payload: ByteArray,
+        val connectedClient: ConnectedClient,
+        val reply: CompletableDeferred<ByteArray>,
     )
 
     private data class ClientConnectDecision(

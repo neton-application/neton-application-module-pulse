@@ -40,6 +40,8 @@ data class PulseEvent(
     /** The build this session ran; symbol tables are keyed by it (see V012). */
     val appVersion: String? = null,
     val buildNumber: Long? = null,
+    /** PulseKit release that encoded this event batch. */
+    val sdkVersion: String? = null,
     /** Runtime package identity reported by the SDK, independent of the registered primary package. */
     val platform: String? = null,
     val packageName: String? = null,

@@ -46,6 +46,7 @@ data class IngestIdentity(
     val userId: String? = null,
     val appVersion: String? = null,
     val buildNumber: Long = 0,
+    val sdkVersion: String? = null,
     val platform: String? = null,
     val packageName: String? = null,
 )
@@ -77,13 +78,14 @@ data class ClientConnectResult(
 )
 
 /** Server-side identity attached to one live connection after CLIENT_CONNECT succeeds. */
-data class ConnectedClient(val request: ClientConnectRequest) {
+data class ConnectedClient(val request: ClientConnectRequest, val connectionId: String) {
     fun batchIdentityRejection(identity: IngestIdentity): String? = when {
         identity.projectId != request.appId -> "batch App ID does not match connected client"
         identity.deviceId != request.deviceId -> "batch device ID does not match connected client"
         identity.installationId != request.installationId -> "batch installation ID does not match connected client"
         identity.platform != request.platform -> "batch platform does not match connected client"
         identity.packageName != request.packageName -> "batch package does not match connected client"
+        identity.sdkVersion != null && identity.sdkVersion != request.sdkVersion -> "batch SDK version does not match connected client"
         else -> null
     }
 
@@ -94,6 +96,21 @@ data class ConnectedClient(val request: ClientConnectRequest) {
         else -> null
     }
 }
+
+@Serializable
+data class ClientHeartbeatRequest(
+    val connectionId: String,
+    val clientTimeMs: Long,
+    val sdkVersion: String = "",
+)
+
+@Serializable
+data class ClientHeartbeatResult(
+    val accepted: Boolean,
+    val serverTimeMs: Long,
+    val configRevision: Long = 0,
+    val heartbeatIntervalMs: Long = 60_000,
+)
 
 /**
  * Response envelope for every Pulse msgtrans request. This belongs to the Pulse application
@@ -160,6 +177,7 @@ object IngestCodec {
             userId = batch.identity.userId,
             appVersion = batch.identity.appVersion,
             buildNumber = batch.identity.buildNumber.takeIf { it > 0 },
+            sdkVersion = batch.identity.sdkVersion,
             platform = batch.identity.platform,
             packageName = batch.identity.packageName,
         )
@@ -180,6 +198,15 @@ object IngestCodec {
         PulseWireResponse.serializer(ClientConnectResult.serializer()),
         response,
     ).encodeToByteArray()
+
+    fun decodeHeartbeat(bytes: ByteArray): ClientHeartbeatRequest =
+        json.decodeFromString(ClientHeartbeatRequest.serializer(), bytes.decodeToString())
+
+    fun encodeHeartbeatResponse(response: PulseWireResponse<ClientHeartbeatResult>): ByteArray =
+        json.encodeToString(
+            PulseWireResponse.serializer(ClientHeartbeatResult.serializer()),
+            response,
+        ).encodeToByteArray()
 
     fun encodeUpdateResponse(response: PulseWireResponse<logic.UpdateCheckResult>): ByteArray =
         json.encodeToString(

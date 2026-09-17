@@ -28,8 +28,8 @@ class PulseIngestLogic(
 
         val columns = "event_id, session_id, ts, kind, name, source_module, source_image_uuid, attributes, " +
             "project_id, device_id, installation_id, user_id, app_version, build_number, " +
-            "platform, package_name, created_at"
-        val params = HashMap<String, Any?>(rows.size * 16)
+            "sdk_version, platform, package_name, created_at"
+        val params = HashMap<String, Any?>(rows.size * 18)
         val values = rows.mapIndexed { i, r ->
             params["event_id_$i"] = r.eventId
             params["session_id_$i"] = r.sessionId
@@ -45,12 +45,13 @@ class PulseIngestLogic(
             params["user_id_$i"] = r.userId
             params["app_version_$i"] = r.appVersion
             params["build_number_$i"] = r.buildNumber
+            params["sdk_version_$i"] = r.sdkVersion
             params["platform_$i"] = r.platform
             params["package_name_$i"] = r.packageName
             params["created_at_$i"] = r.createdAt ?: nowMs()
             "(:event_id_$i, :session_id_$i, :ts_$i, :kind_$i, :name_$i, :source_module_$i, " +
                 ":source_image_uuid_$i, :attributes_$i, :project_id_$i, :device_id_$i, :installation_id_$i, " +
-                ":user_id_$i, :app_version_$i, :build_number_$i, :platform_$i, " +
+                ":user_id_$i, :app_version_$i, :build_number_$i, :sdk_version_$i, :platform_$i, " +
                 ":package_name_$i, :created_at_$i)"
         }.joinToString(", ")
 

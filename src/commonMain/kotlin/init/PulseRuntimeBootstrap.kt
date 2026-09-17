@@ -6,6 +6,7 @@ import logic.PulseAppLogic
 import logic.PulseAuditLogic
 import logic.PulseAlertLogic
 import logic.PulseCrashLogic
+import logic.PulseConnectionLogic
 import logic.PulseIngestLogic
 import neton.core.component.NetonContext
 import neton.logging.LoggerFactory
@@ -26,6 +27,7 @@ object PulseRuntimeBootstrap {
         val appLogic = ctx.get(PulseAppLogic::class)
         val auditLogic = ctx.get(PulseAuditLogic::class)
         val crashLogic = ctx.get(PulseCrashLogic::class)
+        val connectionLogic = ctx.get(PulseConnectionLogic::class)
 
         // The outbound client is owned by the application; this module only borrows it and must
         // never close it. Absent, alerts are still evaluated and recorded — they just have
@@ -37,7 +39,7 @@ object PulseRuntimeBootstrap {
         val queue = PulseQueue(redis)
         ctx.bind(PulseQueue::class, queue)
 
-        val server = PulseIngestServer(queue, appLogic, loggerFactory.get("pulse.ingest-server"))
+        val server = PulseIngestServer(queue, appLogic, connectionLogic, loggerFactory.get("pulse.ingest-server"))
         val consumer = PulseConsumer(queue, ingestLogic, auditLogic, crashLogic, loggerFactory.get("pulse.consumer"))
 
         ctx.lifecycle.register("pulse-msgtrans-ingest", server)

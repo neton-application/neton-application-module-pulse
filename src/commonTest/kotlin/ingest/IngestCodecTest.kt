@@ -108,11 +108,11 @@ class IngestCodecTest {
                 "appVersion":"1.0.0","buildNumber":1,"sdkVersion":"1.0.0",
                 "capabilities":["batch_upload"]}""".encodeToByteArray(),
         )
-        val connectedClient = ConnectedClient(request)
+        val connectedClient = ConnectedClient(request, "connection-1")
 
         assertNull(
             connectedClient.batchIdentityRejection(
-                IngestIdentity("p1", "i1", "d1", platform = "ios", packageName = "com.example.app"),
+                IngestIdentity("p1", "i1", "d1", sdkVersion = "1.0.0", platform = "ios", packageName = "com.example.app"),
             ),
         )
         assertEquals(
@@ -121,6 +121,21 @@ class IngestCodecTest {
                 IngestIdentity("p1", "i1", "other", platform = "ios", packageName = "com.example.app"),
             ),
         )
+    }
+
+    @Test
+    fun heartbeatUsesTheCommonEnvelope() {
+        val request = IngestCodec.decodeHeartbeat(
+            """{"connectionId":"connection-1","clientTimeMs":123,"sdkVersion":"1.0.0"}""".encodeToByteArray(),
+        )
+        assertEquals("connection-1", request.connectionId)
+        assertEquals("1.0.0", request.sdkVersion)
+        val encoded = IngestCodec.encodeHeartbeatResponse(
+            PulseWireResponse(code = 0, data = ClientHeartbeatResult(true, 456, heartbeatIntervalMs = 60_000)),
+        ).decodeToString()
+        val data = IngestCodec.json.parseToJsonElement(encoded).jsonObject.getValue("data").jsonObject
+        assertTrue(data.getValue("accepted").jsonPrimitive.boolean)
+        assertEquals(60_000, data.getValue("heartbeatIntervalMs").jsonPrimitive.content.toInt())
     }
 
     @Test
