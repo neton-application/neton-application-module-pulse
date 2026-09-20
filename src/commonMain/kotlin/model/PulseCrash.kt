@@ -21,6 +21,8 @@ data class PulseCrashIssue(
     /** Grouping key; see [logic.CrashFingerprint]. */
     val fingerprint: String,
     val title: String = "",
+    /** 事件类别:`Crash`(致命)或 `Error`(已捕获)。两者归并方式相同,优先级不同。 */
+    val kind: String = "Crash",
     val message: String = "",
     /**
      * The frames from the first occurrence, raw. Symbolication happens on read, not here: symbols

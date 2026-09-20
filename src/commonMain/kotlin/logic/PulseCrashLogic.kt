@@ -84,7 +84,7 @@ class PulseCrashLogic(
             issueId = PulseCrashIssueTable.insert(
                 PulseCrashIssue(
                     projectId = projectId, fingerprint = fingerprint,
-                    title = row.name, message = message.take(500),
+                    title = row.name, kind = row.kind, message = message.take(500),
                     sampleFrames = rawFrames, sampleSlide = slide,
                     appKey = row.projectId, buildNumber = row.buildNumber,
                     firstSeenAt = row.ts.takeIf { it > 0 } ?: nowMs,
@@ -156,6 +156,7 @@ class PulseCrashLogic(
         status: Int? = null,
         projectId: String? = null,
         sinceMs: Long? = null,
+        kind: String? = null,
     ): List<PulseCrashIssue> =
         PulseCrashIssueTable.query {
             where {
@@ -163,6 +164,7 @@ class PulseCrashLogic(
                     whenPresent(status) { PulseCrashIssue::status eq it },
                     whenPresent(projectId?.takeIf { it.isNotBlank() }) { PulseCrashIssue::projectId eq it },
                     whenPresent(sinceMs) { PulseCrashIssue::lastSeenAt ge it },
+                    whenPresent(kind?.takeIf { it.isNotBlank() }) { PulseCrashIssue::kind eq it },
                 )
             }
         }.list().sortedWith(

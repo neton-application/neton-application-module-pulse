@@ -37,6 +37,13 @@ class PulseCrashController(private val crashes: PulseCrashLogic) {
     @Serializable
     data class UploadSymbolsResponse(val loaded: Int)
 
+    /** Counts for the whole filtered scope, so the list header does not have to lie about a page. */
+    @Serializable
+    data class Summary(
+        val total: Long, val open: Long, val inProgress: Long, val resolved: Long, val ignored: Long,
+        val crash: Long, val error: Long, val devices: Long,
+    )
+
     @Get("/page")
     @Permission("pulse:crash:list")
     suspend fun page(
@@ -45,15 +52,42 @@ class PulseCrashController(private val crashes: PulseCrashLogic) {
         @Query status: Int? = null,
         @Query projectId: String? = null,
         @Query days: Int? = null,
+        @Query kind: String? = null,
     ): PageResponse<PulseCrashIssue> {
         val size = pageSize.coerceIn(1, 200); val no = pageNo.coerceAtLeast(1)
-        val since = days?.coerceIn(1, 30)?.let {
-            kotlin.time.Clock.System.now().toEpochMilliseconds() - it * 86_400_000L
-        }
-        val all = crashes.listIssues(status, projectId, since)
+        val all = crashes.listIssues(status, projectId, sinceOf(days), kind)
         val window = all.drop((no - 1) * size).take(size)
         val pages = if (all.isEmpty()) 0 else (all.size + size - 1) / size
         return PageResponse(window, all.size.toLong(), no, size, pages)
+    }
+
+    /**
+     * Everything the header states about the current scope. Derived from the same query the list
+     * runs, but before paging: a count taken from one page would change as the operator turns pages.
+     */
+    @Get("/summary")
+    @Permission("pulse:crash:list")
+    suspend fun summary(
+        @Query projectId: String? = null,
+        @Query days: Int? = null,
+    ): Summary {
+        val all = crashes.listIssues(null, projectId, sinceOf(days), null)
+        return Summary(
+            total = all.size.toLong(),
+            open = all.count { it.status == model.CrashStatus.OPEN }.toLong(),
+            inProgress = all.count { it.status == model.CrashStatus.IN_PROGRESS }.toLong(),
+            resolved = all.count { it.status == model.CrashStatus.RESOLVED }.toLong(),
+            ignored = all.count { it.status == model.CrashStatus.IGNORED }.toLong(),
+            crash = all.count { it.kind == "Crash" }.toLong(),
+            error = all.count { it.kind == "Error" }.toLong(),
+            // Sums of per-issue device counts overlap; this is "how many device-issue pairs hurt",
+            // which is the number a triage queue is actually ranked by.
+            devices = all.sumOf { it.deviceCount },
+        )
+    }
+
+    private fun sinceOf(days: Int?): Long? = days?.coerceIn(1, 30)?.let {
+        kotlin.time.Clock.System.now().toEpochMilliseconds() - it * 86_400_000L
     }
 
     /** The issue with its stack resolved as far as the uploaded symbols allow. */
