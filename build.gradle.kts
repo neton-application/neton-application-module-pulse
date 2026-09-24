@@ -35,7 +35,7 @@ kotlin {
                 implementation("com.netonstream:neton-jobs")
                 // The msgtrans long-connection ingest transport (sibling composite builds).
                 implementation("com.netonstream:msgtrans:0.1.0")
-                implementation("com.netonstream:neton-io-net:0.1.0")
+                implementation("com.netonstream:neton-io:0.1.0")
                 implementation(libs.kotlinx.serialization.json)
                 implementation(libs.kotlinx.coroutines.core)
             }
