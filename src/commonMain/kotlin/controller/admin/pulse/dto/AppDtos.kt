@@ -14,6 +14,8 @@ data class SaveAppRequest(
     val packageName: String? = null,
     val packagePolicy: String = model.PulsePackagePolicy.STRICT,
     val allowedPackages: String? = null,
+    /** Comma-separated event kinds to collect; empty means all of them. */
+    val collectKinds: String = "",
     val remark: String? = null,
     val status: Int = 1,
 ) {
@@ -22,6 +24,7 @@ data class SaveAppRequest(
         packageName = packageName?.takeIf { it.isNotBlank() },
         packagePolicy = packagePolicy,
         allowedPackages = allowedPackages?.takeIf { it.isNotBlank() },
+        collectKinds = collectKinds.trim(),
         remark = remark, status = status,
     )
 }

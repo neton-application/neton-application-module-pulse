@@ -123,6 +123,7 @@ class PulseIngestServer(
                             ),
                         )
                     } else {
+                        val collectKinds = apps.collectKinds(request.appId, request.platform)
                         val connectionId = newConnectionId()
                         connections.connected(request, connectionId, nowMs())
                         val connectedClient = ConnectedClient(request, connectionId)
@@ -135,6 +136,7 @@ class PulseIngestServer(
                                         protocolVersion = request.protocolVersion,
                                         connectionId = connectionId,
                                         serverTimeMs = nowMs(),
+                                        collectKinds = collectKinds,
                                     ),
                                 ),
                             ),
@@ -156,7 +158,18 @@ class PulseIngestServer(
                 val response = try {
                     val heartbeat = IngestCodec.decodeHeartbeat(query.payload)
                     val data = connections.heartbeat(query.connectedClient, heartbeat, nowMs())
-                    PulseWireResponse(code = 0, data = data)
+                    // The policy rides the heartbeat as well as the connect, so turning a data
+                    // kind off in the console takes effect within one heartbeat instead of
+                    // waiting for every device to reconnect.
+                    PulseWireResponse(
+                        code = 0,
+                        data = data.copy(
+                            collectKinds = apps.collectKinds(
+                                query.connectedClient.request.appId,
+                                query.connectedClient.request.platform,
+                            ),
+                        ),
+                    )
                 } catch (t: IllegalArgumentException) {
                     PulseWireResponse(code = 403, msg = t.message)
                 } catch (t: Throwable) {

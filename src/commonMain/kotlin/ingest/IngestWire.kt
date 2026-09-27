@@ -75,6 +75,11 @@ data class ClientConnectResult(
     val serverTimeMs: Long,
     val configRevision: Long = 0,
     val heartbeatIntervalMs: Long = 60_000,
+    /**
+     * Event kinds this client should upload. Empty means all of them, which is both the default
+     * and what every already-shipped SDK will read from a server that does not send the field.
+     */
+    val collectKinds: List<String> = emptyList(),
 )
 
 /** Server-side identity attached to one live connection after CLIENT_CONNECT succeeds. */
@@ -110,6 +115,11 @@ data class ClientHeartbeatResult(
     val serverTimeMs: Long,
     val configRevision: Long = 0,
     val heartbeatIntervalMs: Long = 60_000,
+    /**
+     * Event kinds this client should upload. Empty means all of them, which is both the default
+     * and what every already-shipped SDK will read from a server that does not send the field.
+     */
+    val collectKinds: List<String> = emptyList(),
 )
 
 /**

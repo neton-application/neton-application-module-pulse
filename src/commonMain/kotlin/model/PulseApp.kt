@@ -28,6 +28,13 @@ data class PulseApp(
     val packagePolicy: String = PulsePackagePolicy.STRICT,
     /** Extra bundle identifiers for allowlist policy, comma or newline separated. */
     val allowedPackages: String? = null,
+    /**
+     * 允许上报的事件类型,逗号分隔;空表示全部。
+     *
+     * 客户端在连接时取回它并据此丢弃本地事件——丢弃发生在写入缓冲之前,所以关掉一类数据
+     * 省下的是设备上的内存、电量和流量,而不只是服务端的存储。
+     */
+    val collectKinds: String = "",
     val remark: String? = null,
     /** 1 enabled, 0 disabled. A disabled app keeps its data but stops answering update checks. */
     val status: Int = 1,

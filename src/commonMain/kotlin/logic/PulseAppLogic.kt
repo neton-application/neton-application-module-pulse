@@ -265,6 +265,25 @@ class PulseAppLogic(private val log: Logger) {
         return null
     }
 
+    /**
+     * Which event kinds this App ID is allowed to upload; empty means every kind.
+     *
+     * Sent on connect and refreshed on every heartbeat, so an operator turning a kind off sees it
+     * take effect across the fleet within a heartbeat interval rather than whenever each device
+     * happens to cold start.
+     */
+    suspend fun collectKinds(appKey: String?, platform: String?): List<String> {
+        val key = appKey?.takeIf(String::isNotBlank) ?: return emptyList()
+        val candidates = PulseAppTable.query { where { PulseApp::appKey eq key } }.list()
+        val app = if (platform.isNullOrBlank()) candidates.singleOrNull()
+        else candidates.firstOrNull { it.platform == platform }
+        return app?.collectKinds
+            ?.split(',')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            .orEmpty()
+    }
+
     private suspend fun generateAvailableAppKey(): String {
         val alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
         repeat(5) {
