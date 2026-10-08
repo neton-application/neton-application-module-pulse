@@ -70,7 +70,7 @@ class PulseIngestHttpController(
         message = "too many update checks")
     suspend fun updateCheck(@Body request: ingest.UpdateCheckRequest): UpdateCheckResult =
         try {
-            apps.checkUpdate(request.platform, request.appKey, request.packageName, request.buildNumber)
+            apps.checkUpdate(request.platform, request.appKey, request.packageName, request.buildNumber, request.versionName)
         } catch (t: Throwable) {
             // Fails open, exactly as the msgtrans path does: an update check must never be the
             // reason a client refuses to start.

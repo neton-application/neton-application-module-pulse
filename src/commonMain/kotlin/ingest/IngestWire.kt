@@ -246,6 +246,11 @@ data class UpdateCheckRequest(
     val appKey: String? = null,
     val packageName: String? = null,
     val buildNumber: Long = 0,
+    /**
+     * 客户端当前的三段式版本名（如 `1.0.2`）。更新判断优先按它做 SemVer 比较;缺省时服务端
+     * 回退到 connect 身份里的 appVersion,再回退到 [buildNumber]。老客户端不发此字段 = 向后兼容。
+     */
+    val versionName: String? = null,
 )
 
 /** Business types on the ingest connection. */
