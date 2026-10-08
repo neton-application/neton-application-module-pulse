@@ -37,6 +37,17 @@ class PulseCrashController(private val crashes: PulseCrashLogic) {
     @Serializable
     data class UploadSymbolsResponse(val loaded: Int)
 
+    @Serializable
+    data class UploadMappingRequest(
+        val appKey: String,
+        val buildNumber: Long,
+        /** R8 / ProGuard mapping.txt 全文。 */
+        val text: String,
+    )
+
+    @Serializable
+    data class UploadMappingResponse(val classes: Int)
+
     /** Counts for the whole filtered scope, so the list header does not have to lie about a page. */
     @Serializable
     data class Summary(
@@ -120,4 +131,17 @@ class PulseCrashController(private val crashes: PulseCrashLogic) {
     @Permission("pulse:crash:list")
     suspend fun symbolCount(@Query appKey: String, @Query buildNumber: Long): Int =
         crashes.symbolCount(appKey, buildNumber)
+
+    /**
+     * Load the R8 mapping for one Android build.
+     *
+     * Same shape and reasoning as [uploadSymbols], for the other platform: Android crashes carry a
+     * textual stack whose class and method names are obfuscated, and only this build's mapping turns
+     * them back into readable code. Its own permission for the same reason — a wrong mapping makes
+     * every stack for that build plausibly-but-wrongly named.
+     */
+    @Post("/mapping/upload")
+    @Permission("pulse:crash:symbols")
+    suspend fun uploadMapping(@Body request: UploadMappingRequest): UploadMappingResponse =
+        UploadMappingResponse(crashes.uploadMapping(request.appKey, request.buildNumber, request.text))
 }

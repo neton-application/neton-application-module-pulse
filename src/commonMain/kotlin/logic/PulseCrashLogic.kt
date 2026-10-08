@@ -5,6 +5,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import model.CrashStatus
+import model.PulseAndroidMapping
 import model.PulseCrashIssue
 import model.PulseCrashSighting
 import model.PulseEvent
@@ -12,6 +13,7 @@ import model.PulseSymbol
 import neton.core.http.BadRequestException
 import neton.database.dsl.*
 import neton.logging.Logger
+import table.PulseAndroidMappingTable
 import table.PulseCrashIssueTable
 import table.PulseCrashSightingTable
 import table.PulseSymbolTable
@@ -37,6 +39,12 @@ data class CrashIssueDetail(
     val frames: List<SymbolicatedFrame>,
     /** False when nothing resolved, so the console can say why rather than showing bare numbers. */
     val symbolicated: Boolean,
+    /**
+     * Android 文本堆栈经该构建的 R8 mapping 反混淆后的结果;没有 mapping 或非 Android 崩溃时为
+     * null（此时看 [frames]/[PulseCrashIssue.sampleStack]）。[deobfuscated] 标明是否真反混淆过。
+     */
+    val retracedStack: String? = null,
+    val deobfuscated: Boolean = false,
 )
 
 /**
@@ -66,13 +74,13 @@ class PulseCrashLogic(
             val frames = CrashFingerprint.parseFrames(attrs["frames"])
             val slide = attrs["image_slide"]?.toLongOrNull() ?: 0L
             val fingerprint = CrashFingerprint.of(row.name, message, frames, slide)
-            record(row, fingerprint, message, attrs["frames"] ?: "", slide, nowMs)
+            record(row, fingerprint, message, attrs["frames"] ?: "", attrs["stack"] ?: "", slide, nowMs)
         }
     }
 
     private suspend fun record(
         row: PulseEvent, fingerprint: String, message: String,
-        rawFrames: String, slide: Long, nowMs: Long,
+        rawFrames: String, rawStack: String, slide: Long, nowMs: Long,
     ) {
         val projectId = row.projectId ?: ""
         val existing = PulseCrashIssueTable.query {
@@ -86,6 +94,7 @@ class PulseCrashLogic(
                     projectId = projectId, fingerprint = fingerprint,
                     title = row.name, kind = row.kind, message = message.take(500),
                     sampleFrames = rawFrames, sampleSlide = slide,
+                    sampleStack = rawStack,
                     appKey = row.projectId, buildNumber = row.buildNumber,
                     firstSeenAt = row.ts.takeIf { it > 0 } ?: nowMs,
                     lastSeenAt = row.ts.takeIf { it > 0 } ?: nowMs,
@@ -106,6 +115,7 @@ class PulseCrashLogic(
                     // Keep the first sample: it is the one whose slide and frames belong together.
                     sampleFrames = existing.sampleFrames.ifEmpty { rawFrames },
                     sampleSlide = if (existing.sampleFrames.isEmpty()) slide else existing.sampleSlide,
+                    sampleStack = existing.sampleStack.ifEmpty { rawStack },
                     // Keep the build the sample came from, so the stack resolves against the right
                     // symbol table even after newer builds start reporting the same issue.
                     buildNumber = existing.buildNumber ?: row.buildNumber,
@@ -179,7 +189,53 @@ class PulseCrashLogic(
             issue.appKey,
             issue.buildNumber,
         )
-        return CrashIssueDetail(issue, frames, frames.any { it.symbol != null })
+        // Android Java/Kotlin 崩溃:有文本栈,若该构建传过 R8 mapping 就反混淆。
+        var retraced: String? = null
+        var deobfuscated = false
+        if (issue.sampleStack.isNotEmpty() && issue.appKey != null && issue.buildNumber != null) {
+            val mappingText = mappingTextFor(issue.appKey, issue.buildNumber)
+            if (mappingText != null) {
+                val mapping = R8Retrace.parse(mappingText)
+                if (!mapping.isEmpty()) {
+                    retraced = mapping.retrace(issue.sampleStack)
+                    deobfuscated = retraced != issue.sampleStack
+                }
+            }
+        }
+        return CrashIssueDetail(
+            issue, frames, frames.any { it.symbol != null },
+            retracedStack = retraced, deobfuscated = deobfuscated,
+        )
+    }
+
+    // ---- Android R8 mapping
+
+    private suspend fun mappingTextFor(appKey: String, buildNumber: Long): String? =
+        PulseAndroidMappingTable.query {
+            where { and(PulseAndroidMapping::appKey eq appKey, PulseAndroidMapping::buildNumber eq buildNumber) }
+            limitOffset(1, 0)
+        }.list().firstOrNull()?.mapping
+
+    /**
+     * 存一个构建的 R8 mapping。整份文本原样存,反混淆在读 issue 详情时做(mapping 可能在崩溃
+     * 之后才补传)。替换而非合并:重传=上一份错了或不全。返回这份 mapping 能解析出的类数,
+     * 让上传方确认不是空文件。
+     */
+    suspend fun uploadMapping(appKey: String, buildNumber: Long, text: String): Int {
+        if (appKey.isBlank()) throw BadRequestException("应用标识不能为空")
+        if (buildNumber <= 0) throw BadRequestException("构建号必须为正整数")
+        val parsed = R8Retrace.parse(text)
+        if (parsed.isEmpty()) throw BadRequestException("没有解析出任何类映射,请确认是 R8/ProGuard 的 mapping.txt")
+        db.execute(
+            "DELETE FROM pulse_android_mappings WHERE app_key = :app_key AND build_number = :build_number",
+            mapOf("app_key" to appKey, "build_number" to buildNumber),
+        )
+        PulseAndroidMappingTable.insert(
+            PulseAndroidMapping(appKey = appKey, buildNumber = buildNumber, mapping = text),
+        )
+        val classes = parsed.classCount()
+        log.info("pulse android mapping loaded: $appKey build=$buildNumber classes=$classes")
+        return classes
     }
 
     suspend fun setStatus(id: Long, status: Int) {
