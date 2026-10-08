@@ -193,10 +193,7 @@ class PulseIngestServer(
                     val rejection = query.connectedClient.updateRequestRejection(req)
                     if (rejection != null) PulseWireResponse(code = 403, msg = rejection)
                     else {
-                        // 版本名优先用请求里的,缺省回退到 connect 身份上报的 appVersion
-                        // （存量客户端不发 versionName,但连上时带了 appVersion=当前版本名）。
-                        val clientVersionName = req.versionName ?: query.connectedClient.request.appVersion
-                        val result = apps.checkUpdate(req.platform, req.appKey, req.packageName, req.buildNumber, clientVersionName)
+                        val result = apps.checkUpdate(req.platform, req.appKey, req.packageName, req.buildNumber)
                         PulseWireResponse(code = 0, data = result)
                     }
                 } catch (t: Throwable) {

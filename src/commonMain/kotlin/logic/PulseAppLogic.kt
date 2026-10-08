@@ -185,12 +185,11 @@ class PulseAppLogic(private val log: Logger) {
         appKey: String?,
         packageName: String?,
         buildNumber: Long,
-        clientVersionName: String? = null,
     ): UpdateCheckResult {
         val app = findApp(platform, appKey, packageName)
         if (app == null || app.status != 1) return UpdateCheckResult(UpdateAction.NONE)
 
-        val published = PulseAppVersionTable.query {
+        val latest = PulseAppVersionTable.query {
             where {
                 and(
                     PulseAppVersion::appId eq app.id,
@@ -198,37 +197,19 @@ class PulseAppLogic(private val log: Logger) {
                 )
             }
             orderBy(PulseAppVersion::buildNumber.desc())
-        }.list()
-        if (published.isEmpty()) return UpdateCheckResult(UpdateAction.NONE)
+            limitOffset(1, 0)
+        }.list().firstOrNull() ?: return UpdateCheckResult(UpdateAction.NONE)
 
-        // 按三段式语义版本（versionName）判新旧:取已发布里 SemVer 最大的一条,和客户端当前版本比。
-        // 比较只在这一处做,客户端只上报版本名(connect 身份里的 appVersion),不含比较逻辑。
-        // 客户端版本名或已发布版本名无法解析成三段式时,回退到整数构建号比较(向后兼容)。
-        val clientSem = SemVer.parseOrNull(clientVersionName)
-        if (clientSem != null) {
-            val latestSem = published
-                .mapNotNull { v -> SemVer.parseOrNull(v.versionName)?.let { it to v } }
-                .maxByOrNull { it.first }
-            if (latestSem != null) {
-                return if (latestSem.first <= clientSem) UpdateCheckResult(UpdateAction.NONE)
-                else updateResult(latestSem.second)
-            }
-            // 已发布版本名都解析不了 → 落到构建号比较。
-        }
+        if (latest.buildNumber <= buildNumber) return UpdateCheckResult(UpdateAction.NONE)
 
-        val latestByBuild = published.maxByOrNull { it.buildNumber }
-            ?: return UpdateCheckResult(UpdateAction.NONE)
-        if (latestByBuild.buildNumber <= buildNumber) return UpdateCheckResult(UpdateAction.NONE)
-        return updateResult(latestByBuild)
+        return UpdateCheckResult(
+            action = if (latest.forceUpdate) UpdateAction.FORCED else UpdateAction.OPTIONAL,
+            latestVersionName = latest.versionName,
+            latestBuildNumber = latest.buildNumber,
+            releaseNotes = latest.releaseNotes,
+            downloadUrl = latest.downloadUrl,
+        )
     }
-
-    private fun updateResult(v: PulseAppVersion) = UpdateCheckResult(
-        action = if (v.forceUpdate) UpdateAction.FORCED else UpdateAction.OPTIONAL,
-        latestVersionName = v.versionName,
-        latestBuildNumber = v.buildNumber,
-        releaseNotes = v.releaseNotes,
-        downloadUrl = v.downloadUrl,
-    )
 
     private suspend fun findApp(platform: String, appKey: String?, packageName: String?): PulseApp? {
         appKey?.takeIf { it.isNotBlank() }?.let { key ->

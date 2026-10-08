@@ -9,11 +9,9 @@ import neton.database.annotations.UpdatedAt
 /**
  * One release of a [PulseApp].
  *
- * Update checks compare the three-part [versionName] (`1.0.2` vs `1.0.3`) via [logic.SemVer];
- * [buildNumber] is the fallback when either side's name is not a parseable semver, and still must
- * increase with every release (the stores gate installs on it). The original worry — that a semver
- * rule implemented on both client and server would drift — does not apply here: the comparison runs
- * only on the server, from the client's reported version name; there is no second implementation.
+ * Ordering is by [buildNumber], never by [versionName]. A semantic version string needs identical
+ * comparison rules on the client and the server, and two implementations of that rule drift; a
+ * monotonically increasing integer has one unambiguous answer. The name is for humans.
  */
 @Serializable
 @Table("pulse_app_versions")
