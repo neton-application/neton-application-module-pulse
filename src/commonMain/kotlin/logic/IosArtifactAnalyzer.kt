@@ -12,7 +12,6 @@ import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
-import neton.core.http.BadRequestException
 import neton.security.digest.Sha256
 import platform.posix.EINTR
 import platform.posix.O_CREAT
@@ -129,13 +128,13 @@ object IosArtifactAnalyzer {
     )
 
     fun analyze(fileName: String, archive: ByteArray): IosArtifactAnalysis {
-        if (archive.isEmpty()) throw BadRequestException("制品文件为空")
-        if (archive.size > MAX_ARCHIVE_BYTES) throw BadRequestException("制品超过 512 MiB 上限")
+        if (archive.isEmpty()) pulseInvalid(PulseErrorCodes.ARTIFACT_EMPTY)
+        if (archive.size > MAX_ARCHIVE_BYTES) pulseInvalid(PulseErrorCodes.ARTIFACT_TOO_LARGE)
         val lower = fileName.lowercase()
         if (!lower.endsWith(".ipa") && !lower.endsWith(".zip")) {
-            throw BadRequestException("仅支持 .ipa 或压缩后的 .xcarchive.zip")
+            pulseInvalid(PulseErrorCodes.ARTIFACT_FORMAT_UNSUPPORTED)
         }
-        if (access("/usr/bin/unzip", X_OK) != 0) throw BadRequestException("分析服务器未安装 unzip")
+        if (access("/usr/bin/unzip", X_OK) != 0) throw IllegalStateException("pulse artifact analysis needs /usr/bin/unzip on the server")
         validateZipStructure(archive)
 
         val root = tempDirectory()
@@ -143,7 +142,7 @@ object IosArtifactAnalyzer {
             val zip = "$root/artifact.zip"
             writeFile(zip, archive)
             if (system("/usr/bin/unzip -qq $zip -d $root/extracted") != 0) {
-                throw BadRequestException("无法解压制品，请确认文件是有效 IPA/XCArchive ZIP")
+                pulseInvalid(PulseErrorCodes.ARTIFACT_UNZIP_FAILED)
             }
             val files = regularFiles("$root/extracted")
             val releaseImages = ArrayList<IosImageAnalysis>()
@@ -154,15 +153,15 @@ object IosArtifactAnalyzer {
                 if (!MachOAnalyzer.hasMachOMagic(magic)) continue
                 val bytes = readFile(path, MAX_IMAGE_BYTES) ?: continue
                 scannedBytes += bytes.size
-                if (scannedBytes > MAX_EXPANDED_BYTES) throw BadRequestException("解压后制品超过 2 GiB 安全上限")
+                if (scannedBytes > MAX_EXPANDED_BYTES) pulseInvalid(PulseErrorCodes.ARTIFACT_EXPANDED_TOO_LARGE)
                 val relative = path.removePrefix("$root/extracted/")
                 val parsed = MachOAnalyzer.analyzeDetailed(relative, bytes)
                 if (isDsymImage(relative)) debugImages += parsed else releaseImages += parsed.map { it.image }
                 if (releaseImages.size + debugImages.size > MAX_IMAGES) {
-                    throw BadRequestException("Mach-O 镜像数量超过安全上限")
+                    pulseInvalid(PulseErrorCodes.ARTIFACT_TOO_MANY_IMAGES)
                 }
             }
-            if (releaseImages.isEmpty()) throw BadRequestException("制品内没有找到发布用 Mach-O 镜像")
+            if (releaseImages.isEmpty()) pulseInvalid(PulseErrorCodes.ARTIFACT_NO_RELEASE_IMAGE)
             val associated = associateDebugSymbols(releaseImages, debugImages)
             val images = associated.images
             val allDebugSymbols = associated.symbols
@@ -211,23 +210,23 @@ object IosArtifactAnalyzer {
         for (p in searchStart downTo searchEnd) {
             if (p + 4 <= zip.size && u32le(zip, p) == ZIP_EOCD) { eocd = p; break }
         }
-        if (eocd < 0 || eocd + 22 > zip.size) throw BadRequestException("不是有效的 ZIP 制品")
+        if (eocd < 0 || eocd + 22 > zip.size) pulseInvalid(PulseErrorCodes.ARTIFACT_ZIP_INVALID)
         val disk = u16le(zip, eocd + 4)
         val centralDisk = u16le(zip, eocd + 6)
         val entries = u16le(zip, eocd + 10)
         val centralSize = u32le(zip, eocd + 12).toLong()
         val centralOffset = u32le(zip, eocd + 16).toLong()
         val commentLength = u16le(zip, eocd + 20)
-        if (disk != 0 || centralDisk != 0) throw BadRequestException("不支持分卷 ZIP")
+        if (disk != 0 || centralDisk != 0) pulseInvalid(PulseErrorCodes.ARTIFACT_ZIP_MULTI_DISK)
         if (entries !in 1..MAX_ZIP_ENTRIES || centralOffset + centralSize != eocd.toLong() ||
             eocd.toLong() + 22 + commentLength != zip.size.toLong()) {
-            throw BadRequestException("ZIP 中央目录异常")
+            pulseInvalid(PulseErrorCodes.ARTIFACT_ZIP_DIRECTORY_CORRUPT)
         }
         val seen = HashSet<String>(entries)
         var expanded = 0L
         var p = centralOffset.toInt()
         repeat(entries) {
-            if (p + 46 > zip.size || u32le(zip, p) != ZIP_CENTRAL_FILE) throw BadRequestException("ZIP 条目损坏")
+            if (p + 46 > zip.size || u32le(zip, p) != ZIP_CENTRAL_FILE) pulseInvalid(PulseErrorCodes.ARTIFACT_ZIP_ENTRY_CORRUPT)
             val madeBy = u16le(zip, p + 4)
             val flags = u16le(zip, p + 8)
             val compressed = u32le(zip, p + 20)
@@ -238,25 +237,25 @@ object IosArtifactAnalyzer {
             val external = u32le(zip, p + 38)
             val end = p.toLong() + 46 + nameLength + extraLength + commentLength
             if (end > zip.size || compressed == UInt.MAX_VALUE || uncompressed == UInt.MAX_VALUE) {
-                throw BadRequestException("不支持 ZIP64 或损坏的 ZIP 条目")
+                pulseInvalid(PulseErrorCodes.ARTIFACT_ZIP64_UNSUPPORTED)
             }
-            if (flags and 0x1 != 0) throw BadRequestException("不支持加密 ZIP")
+            if (flags and 0x1 != 0) pulseInvalid(PulseErrorCodes.ARTIFACT_ZIP_ENCRYPTED)
             val name = zip.copyOfRange(p + 46, p + 46 + nameLength).decodeToString().replace('\\', '/')
             val segments = name.split('/')
             if (name.isBlank() || name.startsWith('/') || segments.any { it == ".." } || '\u0000' in name || !seen.add(name)) {
-                throw BadRequestException("ZIP 包含不安全或重复路径")
+                pulseInvalid(PulseErrorCodes.ARTIFACT_ZIP_UNSAFE_PATH)
             }
             // Unix file type lives in the high 16 bits of external attributes. Unzip can follow a
             // symlink created by an earlier entry, so it has to be rejected before extraction.
             if (madeBy ushr 8 == 3) {
                 val fileType = (external.toInt() ushr 16) and 0xf000
-                if (fileType == 0xa000) throw BadRequestException("ZIP 不允许符号链接")
+                if (fileType == 0xa000) pulseInvalid(PulseErrorCodes.ARTIFACT_ZIP_SYMLINK)
             }
             expanded += uncompressed.toLong()
-            if (expanded > MAX_EXPANDED_BYTES) throw BadRequestException("解压后制品超过 2 GiB 安全上限")
+            if (expanded > MAX_EXPANDED_BYTES) pulseInvalid(PulseErrorCodes.ARTIFACT_EXPANDED_TOO_LARGE)
             p = end.toInt()
         }
-        if (p.toLong() != centralOffset + centralSize) throw BadRequestException("ZIP 中央目录长度不一致")
+        if (p.toLong() != centralOffset + centralSize) pulseInvalid(PulseErrorCodes.ARTIFACT_ZIP_DIRECTORY_CORRUPT)
     }
 
     private fun tempDirectory(): String {
@@ -264,18 +263,18 @@ object IosArtifactAnalyzer {
             val path = "/tmp/pulse-artifact-${getpid()}-${kotlin.time.Clock.System.now().toEpochMilliseconds()}-$attempt"
             if (mkdir(path, 0x1c0u) == 0) return path // 0700
         }
-        throw BadRequestException("无法创建制品分析临时目录")
+        throw IllegalStateException("pulse artifact analysis could not create a temp directory under /tmp")
     }
 
     private fun writeFile(path: String, bytes: ByteArray) {
         val fd = open(path, O_CREAT or O_TRUNC or O_WRONLY, 0x180) // 0600
-        if (fd < 0) throw BadRequestException("无法保存待分析制品")
+        if (fd < 0) throw IllegalStateException("pulse artifact analysis could not open $path for writing (errno=$errno)")
         try {
             var offset = 0
             while (offset < bytes.size) {
                 val n = bytes.usePinned { write(fd, it.addressOf(offset), (bytes.size - offset).convert()) }
                 if (n < 0 && errno == EINTR) continue
-                if (n <= 0) throw BadRequestException("制品写入不完整")
+                if (n <= 0) throw IllegalStateException("pulse artifact analysis wrote $offset of ${bytes.size} bytes to $path (errno=$errno)")
                 offset += n.toInt()
             }
         } finally {
@@ -290,7 +289,7 @@ object IosArtifactAnalyzer {
             st.st_size
         }
         if (size < 0L) return null
-        if (size > maxBytes) throw BadRequestException("单个 Mach-O 镜像超过 512 MiB 上限")
+        if (size > maxBytes) pulseInvalid(PulseErrorCodes.ARTIFACT_IMAGE_TOO_LARGE)
         val fd = open(path, O_RDONLY)
         if (fd < 0) return null
         try {

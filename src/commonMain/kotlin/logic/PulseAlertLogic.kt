@@ -7,7 +7,6 @@ import model.DeliveryStatus
 import model.PulseAlertRecord
 import model.PulseAlertRule
 import model.PulseCrashIssue
-import neton.core.http.BadRequestException
 import neton.database.dsl.*
 import neton.http.client.HttpClient
 import neton.http.client.HttpClientBody
@@ -59,18 +58,16 @@ class PulseAlertLogic(
     suspend fun getRule(id: Long): PulseAlertRule? = PulseAlertRuleTable.get(id)
 
     suspend fun saveRule(rule: PulseAlertRule): Long {
-        if (rule.name.isBlank()) throw BadRequestException("规则名称不能为空")
-        if (!AlertType.isValid(rule.type)) {
-            throw BadRequestException("未知规则类型 '${rule.type}'，可选：${AlertType.ALL.joinToString("、")}")
-        }
+        if (rule.name.isBlank()) pulseInvalid(PulseErrorCodes.ALERT_RULE_NAME_REQUIRED, "name")
+        if (!AlertType.isValid(rule.type)) pulseInvalid(PulseErrorCodes.ALERT_RULE_TYPE_INVALID, "type")
         if (rule.type == AlertType.CRASH_FREE_RATE && (rule.threshold <= 0 || rule.threshold > 100)) {
-            throw BadRequestException("无崩溃率阈值应在 0 到 100 之间")
+            pulseInvalid(PulseErrorCodes.ALERT_CRASH_FREE_RATE_OUT_OF_RANGE, "threshold", mapOf("min" to 0L, "max" to 100L))
         }
         if (rule.type == AlertType.NEW_ISSUE_IMPACT && rule.threshold < 1) {
-            throw BadRequestException("影响设备数阈值至少为 1")
+            pulseInvalid(PulseErrorCodes.ALERT_IMPACT_THRESHOLD_TOO_SMALL, "threshold", mapOf("min" to 1L))
         }
-        if (rule.minDevices < 1) throw BadRequestException("最小样本量至少为 1")
-        if (rule.cooldownMs < 0) throw BadRequestException("冷却时间不能为负")
+        if (rule.minDevices < 1) pulseInvalid(PulseErrorCodes.ALERT_MIN_DEVICES_TOO_SMALL, "minDevices", mapOf("min" to 1L))
+        if (rule.cooldownMs < 0) pulseInvalid(PulseErrorCodes.ALERT_COOLDOWN_NEGATIVE, "cooldownMs", mapOf("min" to 0L))
         return if (rule.id == 0L) PulseAlertRuleTable.insert(rule).id
         else { PulseAlertRuleTable.update(rule); rule.id }
     }

@@ -5,7 +5,6 @@ import model.PulseApp
 import model.PulseAppVersion
 import model.PulsePlatform
 import model.PulsePackagePolicy
-import neton.core.http.BadRequestException
 import neton.database.dsl.*
 import neton.logging.Logger
 import table.PulseAppTable
@@ -25,6 +24,15 @@ data class UpdateCheckResult(
     val releaseNotes: String = "",
     val downloadUrl: String? = null,
 )
+
+/**
+ * Why an event batch or connection was refused by App policy.
+ *
+ * [code] is a [PulseErrorCodes] machine code for the HTTP ingest's Neton envelope. [detail] is the
+ * readable reason, unchanged from before, used as the msgtrans wire `msg` (Pulse's own protocol,
+ * see pulsekit WIRE_PROTOCOL.md, where SDKs branch on the numeric code only) and the dead-letter reason.
+ */
+data class IngestRejection(val code: String, val detail: String)
 
 object UpdateAction {
     /** Already current, or the app is unknown/disabled — either way, do not interrupt the user. */
@@ -88,34 +96,31 @@ class PulseAppLogic(private val log: Logger) {
         }.list()
 
     /**
-     * BadRequestException rather than require(): an IllegalArgumentException surfaces to the
-     * console as "Internal Server Error", which tells the operator nothing. These are all things
-     * the person filling in the form can fix, so they have to come back as 4xx with the reason.
+     * [pulseInvalid] rather than require(): an IllegalArgumentException surfaces to the console as
+     * "Internal Server Error", which tells the operator nothing. These are all things the person
+     * filling in the form can fix, so they come back as 4xx with a machine code and the field.
      */
     private suspend fun validate(app: PulseApp) {
-        if (app.name.isBlank()) throw BadRequestException("应用名称不能为空")
-        if (app.appKey.isBlank()) throw BadRequestException("应用标识不能为空")
-        if (!PulsePlatform.isValid(app.platform)) {
-            throw BadRequestException("未知平台 '${app.platform}'，可选：${PulsePlatform.ALL.joinToString("、")}")
-        }
+        if (app.name.isBlank()) pulseInvalid(PulseErrorCodes.APP_NAME_REQUIRED, "name")
+        if (app.appKey.isBlank()) pulseInvalid(PulseErrorCodes.APP_KEY_REQUIRED, "appKey")
+        if (!PulsePlatform.isValid(app.platform)) pulseInvalid(PulseErrorCodes.APP_PLATFORM_INVALID, "platform")
         if (!PulsePackagePolicy.isValid(app.packagePolicy)) {
-            throw BadRequestException(
-                "未知包名策略 '${app.packagePolicy}'，可选：${PulsePackagePolicy.ALL.joinToString("、")}",
-            )
+            pulseInvalid(PulseErrorCodes.APP_PACKAGE_POLICY_INVALID, "packagePolicy")
         }
         // Web has no package name; every native platform must have one, since it is how a build in
         // the field is identified when it does not know its own app key.
         if (app.platform != PulsePlatform.WEB &&
             app.packagePolicy != PulsePackagePolicy.ANY && app.packageName.isNullOrBlank()) {
-            throw BadRequestException("平台 '${app.platform}' 必须填写包名")
+            pulseInvalid(PulseErrorCodes.APP_PACKAGE_NAME_REQUIRED, "packageName")
         }
-        // Checked here rather than left to the unique index, so the operator gets a sentence
-        // instead of a constraint violation. The index still backstops a race.
+        // Checked here rather than left to the unique index, so the operator gets a machine code
+        // the console can translate instead of a constraint violation. The index still backstops a race.
         val clash = PulseAppTable.query {
             where { PulseApp::appKey eq app.appKey }
         }.list().firstOrNull { it.id != app.id }
         if (clash != null) {
-            throw BadRequestException("已存在应用标识 '${app.appKey}'（${clash.name}）")
+            log.info("pulse app key ${app.appKey} already used by app id=${clash.id}")
+            pulseTaken(PulseErrorCodes.APP_KEY_TAKEN, "appKey")
         }
     }
 
@@ -149,7 +154,7 @@ class PulseAppLogic(private val log: Logger) {
 
     /** Publishing stamps the time, so "when did this go out" does not depend on an edit trail. */
     suspend fun setPublished(id: Long, published: Boolean, nowMs: Long) {
-        val existing = PulseAppVersionTable.get(id) ?: throw BadRequestException("版本不存在：$id")
+        val existing = PulseAppVersionTable.get(id) ?: pulseNotFound(PulseErrorCodes.VERSION_NOT_FOUND)
         PulseAppVersionTable.update(
             existing.copy(
                 published = if (published) 1 else 0,
@@ -160,16 +165,17 @@ class PulseAppLogic(private val log: Logger) {
     }
 
     private suspend fun validate(version: PulseAppVersion) {
-        if (version.versionName.isBlank()) throw BadRequestException("版本名不能为空")
-        if (version.buildNumber <= 0) throw BadRequestException("构建号必须为正整数")
-        if (PulseAppTable.get(version.appId) == null) throw BadRequestException("应用不存在：${version.appId}")
+        if (version.versionName.isBlank()) pulseInvalid(PulseErrorCodes.VERSION_NAME_REQUIRED, "versionName")
+        if (version.buildNumber <= 0) pulseInvalid(PulseErrorCodes.BUILD_NUMBER_INVALID, "buildNumber", mapOf("min" to 1L))
+        if (PulseAppTable.get(version.appId) == null) pulseNotFound(PulseErrorCodes.APP_NOT_FOUND)
         // Same reasoning as the app key: a duplicate build number would make "which is latest"
-        // ambiguous, and the operator should be told that in words.
+        // ambiguous, and the operator should be told so.
         val clash = PulseAppVersionTable.query {
             where { and(PulseAppVersion::appId eq version.appId, PulseAppVersion::buildNumber eq version.buildNumber) }
         }.list().firstOrNull { it.id != version.id }
         if (clash != null) {
-            throw BadRequestException("该应用下构建号 ${version.buildNumber} 已存在（${clash.versionName}）")
+            log.info("pulse build ${version.buildNumber} of app ${version.appId} already used by version id=${clash.id}")
+            pulseTaken(PulseErrorCodes.BUILD_NUMBER_TAKEN, "buildNumber")
         }
     }
 
@@ -234,33 +240,41 @@ class PulseAppLogic(private val log: Logger) {
     }
 
     /**
-     * Validate an event batch before persistence. Null means accepted; a message is a permanent
-     * configuration rejection suitable for the dead-letter console.
+     * Validate an event batch before persistence. Null means accepted; otherwise a permanent
+     * configuration rejection: [IngestRejection.code] for the HTTP (Neton envelope) path,
+     * [IngestRejection.detail] for the msgtrans wire `msg` and the dead-letter console.
      */
     suspend fun ingestRejection(
         appKey: String?,
         platform: String?,
         packageName: String?,
-    ): String? {
+    ): IngestRejection? {
         val key = appKey?.takeIf(String::isNotBlank)
         // The oldest wire shape had no identity at all. It remains ingestible so server rollout
         // does not invalidate already shipped builds; it cannot be associated with an App policy.
         if (key == null && platform.isNullOrBlank() && packageName.isNullOrBlank()) return null
         if (key == null) {
-            val p = platform?.takeIf(String::isNotBlank) ?: return "missing App ID"
-            val pkg = packageName?.takeIf(String::isNotBlank) ?: return "missing App ID"
+            val missing = IngestRejection(PulseErrorCodes.INGEST_APP_ID_MISSING, "missing App ID")
+            val p = platform?.takeIf(String::isNotBlank) ?: return missing
+            val pkg = packageName?.takeIf(String::isNotBlank) ?: return missing
             return if (findApp(p, null, pkg) != null) null
-            else "package '$pkg' is not registered for platform '$p'"
+            else IngestRejection(
+                PulseErrorCodes.INGEST_PACKAGE_NOT_REGISTERED,
+                "package '$pkg' is not registered for platform '$p'",
+            )
         }
         val candidates = PulseAppTable.query {
             where { PulseApp::appKey eq key }
         }.list()
         val app = if (platform.isNullOrBlank()) candidates.singleOrNull()
         else candidates.firstOrNull { it.platform == platform }
-        if (app == null) return "unknown App ID '$key'"
-        if (app.status != 1) return "App ID '$key' is disabled"
+        if (app == null) return IngestRejection(PulseErrorCodes.INGEST_APP_ID_UNKNOWN, "unknown App ID '$key'")
+        if (app.status != 1) return IngestRejection(PulseErrorCodes.INGEST_APP_ID_DISABLED, "App ID '$key' is disabled")
         if (!PulsePackagePolicy.accepts(app, packageName)) {
-            return "package '${packageName ?: "<missing>"}' is not allowed for App ID '$key'"
+            return IngestRejection(
+                PulseErrorCodes.INGEST_PACKAGE_NOT_ALLOWED,
+                "package '${packageName ?: "<missing>"}' is not allowed for App ID '$key'",
+            )
         }
         return null
     }

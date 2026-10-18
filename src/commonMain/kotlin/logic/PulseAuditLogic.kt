@@ -12,7 +12,6 @@ import model.PulseModuleAlert
 import model.PulseModuleRule
 import model.PulseModuleSighting
 import neton.database.api.DbContext
-import neton.core.http.BadRequestException
 import neton.database.dsl.*
 import neton.logging.Logger
 import table.PulseAppTable
@@ -211,10 +210,8 @@ class PulseAuditLogic(
     suspend fun getRule(id: Long): PulseModuleRule? = PulseModuleRuleTable.get(id)
 
     suspend fun saveRule(rule: PulseModuleRule): Long {
-        if (rule.pattern.isBlank()) throw BadRequestException("匹配模式不能为空")
-        if (!AuditSeverity.isValid(rule.severity)) {
-            throw BadRequestException("未知级别 '${rule.severity}'，可选：${AuditSeverity.ALL.joinToString("、")}")
-        }
+        if (rule.pattern.isBlank()) pulseInvalid(PulseErrorCodes.AUDIT_RULE_PATTERN_REQUIRED, "pattern")
+        if (!AuditSeverity.isValid(rule.severity)) pulseInvalid(PulseErrorCodes.AUDIT_RULE_SEVERITY_INVALID, "severity")
         return if (rule.id == 0L) PulseModuleRuleTable.insert(rule).id
         else { PulseModuleRuleTable.update(rule); rule.id }
     }
@@ -245,7 +242,7 @@ class PulseAuditLogic(
         )
 
     suspend fun setAlertStatus(id: Long, status: Int) {
-        val existing = PulseModuleAlertTable.get(id) ?: throw BadRequestException("告警不存在：$id")
+        val existing = PulseModuleAlertTable.get(id) ?: pulseNotFound(PulseErrorCodes.MODULE_ALERT_NOT_FOUND)
         PulseModuleAlertTable.update(existing.copy(status = status))
     }
 

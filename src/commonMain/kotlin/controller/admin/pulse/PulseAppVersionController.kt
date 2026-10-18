@@ -6,7 +6,8 @@ import dto.PageResponse
 import logic.PulseAppLogic
 import model.PulseAppVersion
 import neton.core.annotations.Body
-import neton.core.http.BadRequestException
+import logic.PulseErrorCodes
+import logic.pulseNotFound
 import neton.core.annotations.Controller
 import neton.core.annotations.Delete
 import neton.core.annotations.Get
@@ -55,7 +56,7 @@ class PulseAppVersionController(private val apps: PulseAppLogic) {
     @Permission("pulse:app:save")
     suspend fun update(@Body request: SaveVersionRequest) {
         val existing = apps.getVersion(request.id)
-            ?: throw BadRequestException("版本不存在：${request.id}")
+            ?: pulseNotFound(PulseErrorCodes.VERSION_NOT_FOUND)
         // The original publish time survives edits: fixing a typo in the notes is not a re-release.
         apps.updateVersion(request.toModel(publishedAt = existing.publishedAt))
     }

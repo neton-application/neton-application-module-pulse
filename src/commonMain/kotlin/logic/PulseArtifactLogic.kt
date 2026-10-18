@@ -6,7 +6,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import model.PulsePlatform
-import neton.core.http.BadRequestException
 import neton.database.api.DbContext
 import neton.logging.Logger
 import table.PulseAppTable
@@ -48,10 +47,10 @@ class PulseArtifactLogic(
 ) {
     suspend fun analyze(versionId: Long, fileName: String, bytes: ByteArray): PulseArtifactReport {
         val version = PulseAppVersionTable.get(versionId)
-            ?: throw BadRequestException("版本不存在：$versionId")
+            ?: pulseNotFound(PulseErrorCodes.VERSION_NOT_FOUND)
         val app = PulseAppTable.get(version.appId)
-            ?: throw BadRequestException("版本所属应用不存在：${version.appId}")
-        if (app.platform != PulsePlatform.IOS) throw BadRequestException("只有 iOS 应用版本可上传 IPA/XCArchive")
+            ?: pulseNotFound(PulseErrorCodes.APP_NOT_FOUND)
+        if (app.platform != PulsePlatform.IOS) pulseInvalid(PulseErrorCodes.ARTIFACT_PLATFORM_NOT_IOS)
 
         val result = withContext(Dispatchers.Default) { IosArtifactAnalyzer.analyze(fileName, bytes) }
         val now = kotlin.time.Clock.System.now().toEpochMilliseconds()

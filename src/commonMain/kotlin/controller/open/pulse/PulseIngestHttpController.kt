@@ -11,7 +11,8 @@ import neton.core.annotations.Post
 import neton.core.annotations.RateLimit
 import neton.core.annotations.RateLimitScope
 import neton.logging.Logger
-import neton.core.http.BadRequestException
+import logic.PulseErrorCodes
+import logic.pulseInvalid
 import queue.PulseQueue
 
 /**
@@ -48,7 +49,7 @@ class PulseIngestHttpController(
     @Post("/ingest")
     @AllowAnonymous
     @RateLimit(windowSeconds = 60, maxRequests = 120, scope = RateLimitScope.IP,
-        message = "too many ingest requests")
+        message = PulseErrorCodes.INGEST_RATE_LIMITED)
     suspend fun ingest(@Body batch: ingest.IngestBatch): IngestResponse {
         // Bound as the typed batch rather than a raw string: the framework decodes and validates
         // it, so a body that would only fail later in the consumer is rejected here with a 4xx
@@ -56,7 +57,12 @@ class PulseIngestHttpController(
         if (batch.events.isEmpty()) return IngestResponse(0)
         apps.ingestRejection(
             batch.identity.projectId, batch.identity.platform, batch.identity.packageName,
-        )?.let { throw BadRequestException(it) }
+        )?.let { rejection ->
+            // The Neton envelope carries the machine code; the readable detail (App ID, package)
+            // stays in the log, as on the msgtrans path's dead-letter record.
+            log.warn("pulse http ingest rejected: ${rejection.detail}")
+            pulseInvalid(rejection.code)
+        }
         // Re-encoded rather than forwarding the original bytes, so exactly one shape reaches the
         // queue no matter which entry point produced it.
         queue.enqueue(IngestCodec.json.encodeToString(ingest.IngestBatch.serializer(), batch), nowMs())
@@ -67,7 +73,7 @@ class PulseIngestHttpController(
     @Post("/update-check")
     @AllowAnonymous
     @RateLimit(windowSeconds = 60, maxRequests = 60, scope = RateLimitScope.IP,
-        message = "too many update checks")
+        message = PulseErrorCodes.UPDATE_CHECK_RATE_LIMITED)
     suspend fun updateCheck(@Body request: ingest.UpdateCheckRequest): UpdateCheckResult =
         try {
             apps.checkUpdate(request.platform, request.appKey, request.packageName, request.buildNumber)

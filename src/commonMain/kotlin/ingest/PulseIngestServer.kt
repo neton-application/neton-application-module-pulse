@@ -97,8 +97,8 @@ class PulseIngestServer(
                         // Permanent configuration rejection. Keep the raw batch in dead letters as
                         // evidence, acknowledge it so the client does not retry forever, and let an
                         // operator loosen the policy then replay if the package is legitimate.
-                        queue.reject(text, rejected, nowMs())
-                        log.warn("pulse ingest rejected: $rejected")
+                        queue.reject(text, rejected.detail, nowMs())
+                        log.warn("pulse ingest rejected: ${rejected.detail}")
                     }
                     PulseWireResponse(code = 0, data = true)
                 } catch (t: Throwable) {
@@ -115,7 +115,7 @@ class PulseIngestServer(
                 val decision = try {
                     val request = IngestCodec.decodeClientConnect(query.payload)
                     val invalid = clientConnectRejection(request)
-                        ?: apps.ingestRejection(request.appId, request.platform, request.packageName)
+                        ?: apps.ingestRejection(request.appId, request.platform, request.packageName)?.detail
                     if (invalid != null) {
                         ClientConnectDecision(
                             IngestCodec.encodeClientConnectResponse(

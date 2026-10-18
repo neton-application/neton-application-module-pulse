@@ -10,7 +10,6 @@ import model.PulseCrashIssue
 import model.PulseCrashSighting
 import model.PulseEvent
 import model.PulseSymbol
-import neton.core.http.BadRequestException
 import neton.database.dsl.*
 import neton.logging.Logger
 import table.PulseAndroidMappingTable
@@ -222,10 +221,10 @@ class PulseCrashLogic(
      * 让上传方确认不是空文件。
      */
     suspend fun uploadMapping(appKey: String, buildNumber: Long, text: String): Int {
-        if (appKey.isBlank()) throw BadRequestException("应用标识不能为空")
-        if (buildNumber <= 0) throw BadRequestException("构建号必须为正整数")
+        if (appKey.isBlank()) pulseInvalid(PulseErrorCodes.APP_KEY_REQUIRED, "appKey")
+        if (buildNumber <= 0) pulseInvalid(PulseErrorCodes.BUILD_NUMBER_INVALID, "buildNumber", mapOf("min" to 1L))
         val parsed = R8Retrace.parse(text)
-        if (parsed.isEmpty()) throw BadRequestException("没有解析出任何类映射,请确认是 R8/ProGuard 的 mapping.txt")
+        if (parsed.isEmpty()) pulseInvalid(PulseErrorCodes.MAPPING_EMPTY)
         db.execute(
             "DELETE FROM pulse_android_mappings WHERE app_key = :app_key AND build_number = :build_number",
             mapOf("app_key" to appKey, "build_number" to buildNumber),
@@ -239,7 +238,7 @@ class PulseCrashLogic(
     }
 
     suspend fun setStatus(id: Long, status: Int) {
-        val issue = PulseCrashIssueTable.get(id) ?: throw BadRequestException("崩溃问题不存在：$id")
+        val issue = PulseCrashIssueTable.get(id) ?: pulseNotFound(PulseErrorCodes.CRASH_ISSUE_NOT_FOUND)
         PulseCrashIssueTable.update(issue.copy(status = status))
     }
 
@@ -297,11 +296,11 @@ class PulseCrashLogic(
      * different order, and start addresses already turn an address into a function name.
      */
     suspend fun uploadSymbols(appKey: String, buildNumber: Long, text: String): Int {
-        if (appKey.isBlank()) throw BadRequestException("应用标识不能为空")
-        if (buildNumber <= 0) throw BadRequestException("构建号必须为正整数")
+        if (appKey.isBlank()) pulseInvalid(PulseErrorCodes.APP_KEY_REQUIRED, "appKey")
+        if (buildNumber <= 0) pulseInvalid(PulseErrorCodes.BUILD_NUMBER_INVALID, "buildNumber", mapOf("min" to 1L))
 
         val parsed = SymbolTable.parse(text)
-        if (parsed.isEmpty()) throw BadRequestException("没有解析出任何符号，请确认是 `nm -n` 的输出")
+        if (parsed.isEmpty()) pulseInvalid(PulseErrorCodes.SYMBOLS_EMPTY)
 
         // Replace rather than merge: a re-upload means the previous table was wrong or partial,
         // and mixing two tables would resolve some addresses against a build that no longer exists.

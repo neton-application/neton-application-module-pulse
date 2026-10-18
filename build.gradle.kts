@@ -50,6 +50,13 @@ kotlin {
     }
 }
 
+// Error message guard (suite rule: business error messages are machine codes, see docs/pulse-errors.md).
+// The shared fixture lives in neton-application-contract and only joins the test source set.
+kotlin.sourceSets.named("macosArm64Test") { kotlin.srcDir("../../Neton/neton-application-contract/src/testFixtures/kotlin") }
+tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeTest>().configureEach {
+    environment("NETON_MODULE_DIR", projectDir.absolutePath)
+}
+
 dependencies {
     add("kspMacosArm64", "com.netonstream:neton-ksp")
     add("kspLinuxX64", "com.netonstream:neton-ksp")

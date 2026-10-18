@@ -7,7 +7,8 @@ import logic.PulseAppLogic
 import model.PulseApp
 import model.PulsePlatform
 import neton.core.annotations.Body
-import neton.core.http.BadRequestException
+import logic.PulseErrorCodes
+import logic.pulseNotFound
 import neton.core.annotations.Controller
 import neton.core.annotations.Delete
 import neton.core.annotations.Get
@@ -68,7 +69,7 @@ class PulseAppController(private val apps: PulseAppLogic) {
     @Put("/update")
     @Permission("pulse:app:save")
     suspend fun update(@Body request: SaveAppRequest) {
-        val existing = apps.getApp(request.id) ?: throw BadRequestException("应用不存在：${request.id}")
+        val existing = apps.getApp(request.id) ?: pulseNotFound(PulseErrorCodes.APP_NOT_FOUND)
         apps.updateApp(request.toModel(existing.appKey))
     }
 
