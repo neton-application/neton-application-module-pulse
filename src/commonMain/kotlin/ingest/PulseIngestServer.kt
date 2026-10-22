@@ -41,7 +41,7 @@ class PulseIngestServer(
     private val apps: PulseAppLogic,
     private val connections: PulseConnectionLogic,
     private val log: Logger,
-    private val host: String = "0.0.0.0",
+    private val host: String = defaultHost(),
     private val port: Int = defaultPort(),
 ) : NetonLifecycle {
 
@@ -368,5 +368,8 @@ class PulseIngestServer(
 
     companion object {
         fun defaultPort(): Int = getenv("PULSE_INGEST_PORT")?.toKString()?.toIntOrNull() ?: 6000
+
+        /** SDK ingest is public by default; `PULSE_INGEST_HOST=127.0.0.1` keeps a local stack on loopback. */
+        fun defaultHost(): String = getenv("PULSE_INGEST_HOST")?.toKString()?.trim()?.takeIf { it.isNotEmpty() } ?: "0.0.0.0"
     }
 }
