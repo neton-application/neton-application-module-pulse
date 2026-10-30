@@ -36,7 +36,7 @@ kotlin {
                 // The msgtrans long-connection ingest transport. It brings com.netonstream:io (the
                 // renamed neton-io) through its api dependency; the old neton-io coordinate must not be
                 // added beside it, both hold the neton.io packages.
-                implementation("com.netonstream:msgtrans:0.2.0")
+                implementation("com.netonstream:msgtrans:0.5.0")
                 implementation(libs.kotlinx.serialization.json)
                 implementation(libs.kotlinx.coroutines.core)
             }
