@@ -13,7 +13,7 @@ kotlin {
     // No mingw: the msgtrans/neton-io transport has no Windows target yet. Server runs on
     // macOS (dev) and Linux.
     listOf(macosArm64(), linuxX64(), linuxArm64()).forEach { target ->
-        val coreInterop = file("$projectDir/../../Neton/neton/neton-core/build/nativeInterop/${target.name}").absolutePath
+        val coreInterop = file("$projectDir/../neton/neton-core/build/nativeInterop/${target.name}").absolutePath
         target.binaries.forEach { binary ->
             binary.linkerOpts.add("-L$coreInterop")
             binary.linkerOpts.add("-lenv")
@@ -52,7 +52,7 @@ kotlin {
 
 // Error message guard (suite rule: business error messages are machine codes, see docs/pulse-errors.md).
 // The shared fixture lives in neton-application-contract and only joins the test source set.
-kotlin.sourceSets.named("macosArm64Test") { kotlin.srcDir("../../Neton/neton-application-contract/src/testFixtures/kotlin") }
+kotlin.sourceSets.named("macosArm64Test") { kotlin.srcDir("../neton-application-contract/src/testFixtures/kotlin") }
 tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeTest>().configureEach {
     environment("NETON_MODULE_DIR", projectDir.absolutePath)
 }
@@ -82,4 +82,4 @@ tasks.matching { it.name.matches(Regex("kspKotlin(LinuxX64|LinuxArm64)")) }.conf
 extra["neton.migration.moduleId"] = "pulse"
 extra["neton.migration.dialects"] = listOf("postgresql")
 extra["neton.migration.sqlSourceDir"] = file("sql")
-apply(from = "../../Neton/neton/scripts/embed-migration-resources.gradle.kts")
+apply(from = "../neton/scripts/embed-migration-resources.gradle.kts")
