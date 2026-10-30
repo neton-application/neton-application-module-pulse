@@ -1,0 +1,140 @@
+{
+  "release": "1.0.0-beta",
+  "module": "pulse",
+  "fresh_install_only": true,
+  "dependencies": [
+    "system"
+  ],
+  "baseline": [
+    {
+      "file": "V001__schema.sql",
+      "sha256": "09b39294ec60a2637b87b6f6311589be03f7bb24e534277dae7cc1d93dbcaa1e"
+    },
+    {
+      "file": "V002__data.sql",
+      "sha256": "5843403e901b453fa45eca56af9d189b2202598c49b95c4f45c274d5fd5804bd"
+    }
+  ],
+  "superseded": [
+    {
+      "name": "V001__baseline.sql",
+      "sha256": "c8ced5d30d00103614d6da5b37b7621f6199e5104f32a7dcb59f4fe5c7792234"
+    },
+    {
+      "name": "V002__menus.sql",
+      "sha256": "21c606012d94fcdfdd7b3f9657bbb20bf20cb301804d14c07ac864766efa5fb2"
+    },
+    {
+      "name": "V003__event_domain_views.sql",
+      "sha256": "68ed9cbdbd641290adf39163e583f19872876cc7b2c140dafb9c00d20848e461"
+    },
+    {
+      "name": "V004__event_identity.sql",
+      "sha256": "2c94568119c2fab478ca20185e8a777aa22fa5bc8a6660d2e641010819e16907"
+    },
+    {
+      "name": "V005__apps_and_versions.sql",
+      "sha256": "b2da2765887562913c5e6be3d95970311cd2390aaf976d78458b4979b741010d"
+    },
+    {
+      "name": "V006__app_menus.sql",
+      "sha256": "4a1bdb8d340bc4d5432c7884818e0e0476a51e540046fcabceeb2b17ed386182"
+    },
+    {
+      "name": "V007__pipeline_menu.sql",
+      "sha256": "861dfa31d5e1369b2249e13193b3b4852d7ef6df010e6c8314bae5ef4b6317fc"
+    },
+    {
+      "name": "V008__module_audit.sql",
+      "sha256": "ccf4560a15888d3f168ceb2633027e975c62afba1d1cf7b775bd45b99615ab8e"
+    },
+    {
+      "name": "V009__audit_menu.sql",
+      "sha256": "a4ac12cb9d2a716bd3a7fbe8c71493c44424f8e8c05fc205ac5774df7158fc61"
+    },
+    {
+      "name": "V010__crash_issues.sql",
+      "sha256": "008348aac9e1ccd1f53ef6ea562b1f1efc98b6a824610be37fe3e53b601862ce"
+    },
+    {
+      "name": "V011__crash_menu.sql",
+      "sha256": "ce7cfad2b12e005736ddaaeb1f926e484264b04b4769b8712f7defb5c59a9378"
+    },
+    {
+      "name": "V012__event_build.sql",
+      "sha256": "500f452bc5a4f0b07fdf0f7774f45af2c0f718df434a7b5495ff3126e1a1fe98"
+    },
+    {
+      "name": "V013__version_menu.sql",
+      "sha256": "bdf54dc104da191391b3c553043d897725ae54a70c7bf6f72925e5c18128b4de"
+    },
+    {
+      "name": "V014__sightings_per_build.sql",
+      "sha256": "741ec9cb817c3dbb8dac358306664fce5a04e4a74bde91551e3fa9290acaeeb1"
+    },
+    {
+      "name": "V015__alerts.sql",
+      "sha256": "7dae7bca59c2657edf40b65099b0b92976779b5b647098d1aab61535957d82f8"
+    },
+    {
+      "name": "V016__alert_menu.sql",
+      "sha256": "c7f3154c654c289809921afc0ed85c8fb82236ae6d14e44b0e82cc9d4ba40262"
+    },
+    {
+      "name": "V017__behavior_alerts.sql",
+      "sha256": "e19ae0327e4c733227f348eaa311fc2eb4f78219a9357f280e960af49c9484c2"
+    },
+    {
+      "name": "V018__alert_detail.sql",
+      "sha256": "d75e9e3ca70095b46b0fa6d32b1fff5b0485fc9df561d81d78c254ee173eac8b"
+    },
+    {
+      "name": "V019__app_identity_and_package_policy.sql",
+      "sha256": "9d6c1f1866969007fca8abe1f65c339cb086ce1adf9ab4a16937a0b167531562"
+    },
+    {
+      "name": "V020__event_source_image_uuid.sql",
+      "sha256": "ae02e3ea8ad698ed15c3b481e85d5c945d6ffc77a360210675fe2b90fb1f70f8"
+    },
+    {
+      "name": "V021__consolidate_pulse_menu.sql",
+      "sha256": "34edc79a7d07d175ed4eb349668b1f0fd2d3fdfd1b14b841469c6ad2ffc681e4"
+    },
+    {
+      "name": "V022__overview_metrics_indexes.sql",
+      "sha256": "f11fe545429ab22fcb87c73d8081d264f9e377a1e719e0a20cf75006bae6cc92"
+    },
+    {
+      "name": "V023__analysis_drilldown_menus.sql",
+      "sha256": "9f4684a46b5c0f9ad9d4c8d247f7429d454099513d18ad9fedcc7288a11ed817"
+    },
+    {
+      "name": "V024__artifact_analysis.sql",
+      "sha256": "e12129c6be45e3a64dccf201e62a24fd04973d9dcab71648191bed7c1e8bfdcd"
+    },
+    {
+      "name": "V025__artifact_runtime_evidence_and_dsym.sql",
+      "sha256": "fe9f4fd5d4890f278b82e8fe9c7f0a569049c867bc03f6c026f7cebec0907446"
+    },
+    {
+      "name": "V026__client_presence_and_sdk_version.sql",
+      "sha256": "ab3cda4303bd182f75b4203ed3dab95b28645bd223bd9b958f1ceeba7c52651c"
+    },
+    {
+      "name": "V027__crash_issue_kind.sql",
+      "sha256": "a152ca676c1374aef59b469df8d9bf9eae44617f52bf60d217c1220a4f5d438c"
+    },
+    {
+      "name": "V028__restore_analysis_menus.sql",
+      "sha256": "210b9f7a8ea01c8121ba6c7b7552926431f8ff93fdf76f5f4ee5f980aebd6429"
+    },
+    {
+      "name": "V029__app_collection_policy.sql",
+      "sha256": "5c6363be068c24f730f1d07ea290aeb30898831582267570837ef62238ecc719"
+    },
+    {
+      "name": "V030__crash_stack_and_android_mapping.sql",
+      "sha256": "69f24b1cc148cd1fc09ccb6467f6816528b270f6528b17e26ee279b67e4e47ad"
+    }
+  ]
+}
